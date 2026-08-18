@@ -2,7 +2,6 @@ package com.example.ozareventscanner.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -10,14 +9,18 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,38 +29,47 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.ozareventscanner.ui.components.ModalBottomSheetResultadoScan
 import com.example.ozareventscanner.ui.theme.*
-import com.example.ozareventscanner.viewmodel.AppViewModel
+import com.example.ozareventscanner.viewmodel.EventoViewModel
+import com.example.ozareventscanner.viewmodel.ScanUiState
 import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 
-// Color oscuro específico para overlays del escáner (debe ser oscuro para contrastar con la cámara)
-private val QrFondo      = Color(0xFF0F172A)
-private val QrAccent     = ColorPrimary
-private val QrVerde      = ColorAccent
-private val QrSecundario = ColorTextSecondary
+// ─────────────────────────────────────────────────────────────────────────────
+// Paleta del lector QR
+// ─────────────────────────────────────────────────────────────────────────────
+private val QrFondo    = Color(0xFF0F172A)
+private val QrAccent   = ColorPrimary
+private val QrVerde    = ColorSuccess
+private val QrAmarillo = ColorWarning
+private val QrRojo     = ColorError
 
 /**
- * Pantalla 4 — Lector QR con CameraX + ML Kit.
- * Pide permiso de cámara en tiempo de ejecución.
- * Muestra el resultado del último QR escaneado.
+ * Pantalla de Escaneo QR con CameraX y ML Kit.
+ *
+ * Al detectar un código QR, consulta Room de forma offline-first e invoca
+ * el [ModalBottomSheetResultadoScan] para mostrar el resultado y validar
+ * la identidad del participante.
  */
 @Composable
 fun PantallaLectorQr(
-    viewModel: AppViewModel,
+    viewModel: EventoViewModel,
     onVolver: () -> Unit
 ) {
     val context        = LocalContext.current
-    val resultadoQr   by viewModel.resultadoQr.collectAsState()
-    var tienePermiso   by remember {
+    val scanState      by viewModel.scanState.collectAsState()
+    val scanModalData  by viewModel.scanModalData.collectAsState()
+
+    var tienePermiso by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
                 == PackageManager.PERMISSION_GRANTED
@@ -78,28 +90,24 @@ fun PantallaLectorQr(
             .background(QrFondo)
     ) {
         if (tienePermiso) {
-            // ── Vista de cámara ───────────────────────────────────────────────
-            CameraPreview(
+            // ── Cámara en Vivo ────────────────────────────────────────────────
+            CameraPreviewWithValidation(
                 modifier = Modifier.fillMaxSize(),
+                estaEscaneandoActivo = scanState is ScanUiState.Idle && scanModalData == null,
                 onQrDetectado = { codigo ->
-                    viewModel.registrarResultadoQr(codigo)
+                    viewModel.validarYMarcarParticipante(codigo)
                 }
             )
 
-            // ── Overlay oscuro superior e inferior ────────────────────────────
+            // ── Overlays oscurecedores fuera del área de escaneo ──────────────
             Column(modifier = Modifier.fillMaxSize()) {
-                // Zona superior opaca
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1.5f)
-                        .background(QrFondo.copy(alpha = 0.7f))
+                        .background(QrFondo.copy(alpha = 0.72f))
                 )
-                // Zona del marco (transparente)
-                Box(modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(3f))
-                // Zona inferior opaca
+                Box(modifier = Modifier.fillMaxWidth().weight(3f))
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -108,42 +116,68 @@ fun PantallaLectorQr(
                 )
             }
 
-            // ── Marco de escaneo animado ──────────────────────────────────────
+            // ── Marco Animado ─────────────────────────────────────────────────
             MarcoEscaneo(
+                scanState = scanState,
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(240.dp)
             )
 
+            // ── Spinner Central durante procesamiento ─────────────────────────
+            AnimatedVisibility(
+                visible = scanState is ScanUiState.Procesando,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(240.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(20.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = QrAccent,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(48.dp)
+                    )
+                }
+            }
+
         } else {
-            // ── Sin permiso ───────────────────────────────────────────────────
+            // ── Permiso Denegado ──────────────────────────────────────────────
             Box(
-                modifier         = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier            = Modifier.padding(32.dp)
+                    modifier = Modifier.padding(32.dp)
                 ) {
-                    Text(
-                        text       = "📷",
-                        fontSize   = 56.sp
+                    Icon(
+                        imageVector = Icons.Default.CameraAlt,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.4f),
+                        modifier = Modifier.size(72.dp)
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text       = "Permiso de cámara requerido",
+                        text = "Permiso de cámara requerido",
                         fontWeight = FontWeight.Bold,
-                        color      = Color.White,
-                        fontSize   = 18.sp
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        textAlign = TextAlign.Center
                     )
                     Text(
-                        text     = "Necesitamos acceso a la cámara para escanear códigos QR",
-                        color    = Color.White.copy(alpha = 0.7f),
+                        text = "Se requiere acceso a la cámara para escanear los códigos QR de los participantes.",
+                        color = Color.White.copy(alpha = 0.65f),
+                        textAlign = TextAlign.Center,
                         modifier = Modifier.padding(top = 8.dp, bottom = 24.dp)
                     )
                     Button(
                         onClick = { launcher.launch(Manifest.permission.CAMERA) },
-                        colors  = ButtonDefaults.buttonColors(containerColor = QrAccent)
+                        colors = ButtonDefaults.buttonColors(containerColor = QrAccent)
                     ) {
                         Text("Conceder Permiso", color = Color.White)
                     }
@@ -151,168 +185,137 @@ fun PantallaLectorQr(
             }
         }
 
-        // ── Botón volver (siempre visible) ────────────────────────────────────
+        // ── Botón Volver ──────────────────────────────────────────────────────
         IconButton(
-            onClick  = onVolver,
+            onClick = onVolver,
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 8.dp, top = 44.dp)
-                .background(QrFondo.copy(alpha = 0.6f), RoundedCornerShape(50))
+                .padding(start = 16.dp, top = 48.dp)
+                .background(Color.Black.copy(alpha = 0.45f), CircleShape)
         ) {
             Icon(
-                imageVector        = Icons.Default.ArrowBack,
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "Volver",
-                tint               = Color.White
+                tint = Color.White
             )
         }
 
-        // ── Texto guía ────────────────────────────────────────────────────────
-        if (tienePermiso) {
+        // ── Etiqueta Guía ─────────────────────────────────────────────────────
+        if (tienePermiso && scanState is ScanUiState.Idle && scanModalData == null) {
             Text(
-                text     = "Apunta al código QR del participante",
-                color    = Color.White,
-                fontSize = 14.sp,
+                text = "Apunta al código QR del participante",
+                color = Color.White,
+                fontSize = 13.sp,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 52.dp)
-                    .background(QrFondo.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                    .padding(top = 54.dp)
+                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
                     .padding(horizontal = 16.dp, vertical = 6.dp)
             )
         }
 
-        // ── Panel de resultado QR ─────────────────────────────────────────────
-        if (resultadoQr != null) {
-            ResultadoQrPanel(
-                codigo    = resultadoQr ?: "",
-                onDismiss = { viewModel.limpiarResultadoQr() },
-                modifier  = Modifier.align(Alignment.BottomCenter)
+        // ── ModalBottomSheet de Validación de Identidad y Resultado ──────────
+        scanModalData?.let { data ->
+            ModalBottomSheetResultadoScan(
+                data = data,
+                onDismiss = {
+                    viewModel.cerrarModalScan()
+                }
             )
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Marco de escaneo animado
+// Marco de Escaneo Reactivo
 // ─────────────────────────────────────────────────────────────────────────────
 @Composable
-private fun MarcoEscaneo(modifier: Modifier = Modifier) {
+private fun MarcoEscaneo(
+    scanState: ScanUiState,
+    modifier: Modifier = Modifier
+) {
+    val colorMarco = when (scanState) {
+        is ScanUiState.Valido      -> QrVerde
+        is ScanUiState.YaEscaneado,
+        is ScanUiState.FormatoInvalido -> QrAmarillo
+        is ScanUiState.NoEncontrado,
+        is ScanUiState.ErrorScan   -> QrRojo
+        else                       -> QrAccent
+    }
+
     val infiniteTransition = rememberInfiniteTransition(label = "marco")
     val alphaLinea by infiniteTransition.animateFloat(
-        initialValue   = 0.2f,
-        targetValue    = 1f,
-        animationSpec  = infiniteRepeatable(tween(900), RepeatMode.Reverse),
-        label          = "linea_scan"
+        initialValue  = 0.2f,
+        targetValue   = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label         = "linea_scan"
     )
 
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        // Marco con esquinas redondeadas
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .border(2.dp, QrAccent.copy(alpha = 0.8f), RoundedCornerShape(20.dp))
+                .border(2.dp, colorMarco.copy(alpha = 0.85f), RoundedCornerShape(20.dp))
         )
 
-        // Línea de escaneo horizontal
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(0.85f)
-                .height(2.dp)
-                .alpha(alphaLinea)
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(Color.Transparent, QrAccent, QrAccent, Color.Transparent)
+        if (scanState is ScanUiState.Idle) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.85f)
+                    .height(2.dp)
+                    .alpha(alphaLinea)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(Color.Transparent, colorMarco, colorMarco, Color.Transparent)
+                        )
                     )
-                )
-        )
+            )
+        }
 
         // Esquinas decorativas
-        val cornerSize = 24.dp
+        val cornerSize  = 24.dp
         val cornerWidth = 3.dp
 
-        // Esquina superior-izquierda
         Box(modifier = Modifier.align(Alignment.TopStart)) {
-            Box(modifier = Modifier.size(cornerSize, cornerWidth).background(QrAccent))
-            Box(modifier = Modifier.size(cornerWidth, cornerSize).background(QrAccent))
+            Box(modifier = Modifier.size(cornerSize, cornerWidth).background(colorMarco))
+            Box(modifier = Modifier.size(cornerWidth, cornerSize).background(colorMarco))
         }
-        // Esquina superior-derecha
         Box(modifier = Modifier.align(Alignment.TopEnd)) {
-            Box(modifier = Modifier.size(cornerSize, cornerWidth).align(Alignment.TopEnd).background(QrAccent))
-            Box(modifier = Modifier.size(cornerWidth, cornerSize).align(Alignment.TopEnd).background(QrAccent))
+            Box(modifier = Modifier.size(cornerSize, cornerWidth).align(Alignment.TopEnd).background(colorMarco))
+            Box(modifier = Modifier.size(cornerWidth, cornerSize).align(Alignment.TopEnd).background(colorMarco))
         }
-        // Esquina inferior-izquierda
         Box(modifier = Modifier.align(Alignment.BottomStart)) {
-            Box(modifier = Modifier.size(cornerSize, cornerWidth).align(Alignment.BottomStart).background(QrAccent))
-            Box(modifier = Modifier.size(cornerWidth, cornerSize).align(Alignment.BottomStart).background(QrAccent))
+            Box(modifier = Modifier.size(cornerSize, cornerWidth).align(Alignment.BottomStart).background(colorMarco))
+            Box(modifier = Modifier.size(cornerWidth, cornerSize).align(Alignment.BottomStart).background(colorMarco))
         }
-        // Esquina inferior-derecha
         Box(modifier = Modifier.align(Alignment.BottomEnd)) {
-            Box(modifier = Modifier.size(cornerSize, cornerWidth).align(Alignment.BottomEnd).background(QrAccent))
-            Box(modifier = Modifier.size(cornerWidth, cornerSize).align(Alignment.BottomEnd).background(QrAccent))
+            Box(modifier = Modifier.size(cornerSize, cornerWidth).align(Alignment.BottomEnd).background(colorMarco))
+            Box(modifier = Modifier.size(cornerWidth, cornerSize).align(Alignment.BottomEnd).background(colorMarco))
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Panel resultado QR (Estilo Claro/Superficie Blanca)
+// CameraX Preview + ML Kit
 // ─────────────────────────────────────────────────────────────────────────────
 @Composable
-private fun ResultadoQrPanel(codigo: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
-    Card(
-        modifier  = modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        shape     = RoundedCornerShape(16.dp),
-        colors    = CardDefaults.cardColors(containerColor = ColorSurface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-    ) {
-        Row(
-            modifier          = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector        = Icons.Default.CheckCircle,
-                contentDescription = null,
-                tint               = QrVerde,
-                modifier           = Modifier.size(36.dp)
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text       = "Código detectado",
-                    fontWeight = FontWeight.Bold,
-                    color      = ColorTextPrimary,
-                    fontSize   = 14.sp
-                )
-                Text(
-                    text     = codigo,
-                    color    = QrSecundario,
-                    fontSize = 12.sp
-                )
-            }
-            TextButton(onClick = onDismiss) {
-                Text("OK", color = QrAccent, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CameraX Preview + Analizador ML Kit
-// ─────────────────────────────────────────────────────────────────────────────
-@Composable
-private fun CameraPreview(
+private fun CameraPreviewWithValidation(
     modifier: Modifier = Modifier,
+    estaEscaneandoActivo: Boolean,
     onQrDetectado: (String) -> Unit
 ) {
-    val context        = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor       = remember { Executors.newSingleThreadExecutor() }
     val scanner        = remember { BarcodeScanning.getClient() }
 
+    DisposableEffect(Unit) {
+        onDispose { executor.shutdown() }
+    }
+
     AndroidView(
         modifier = modifier,
-        factory  = { ctx ->
-            val previewView = PreviewView(ctx)
+        factory = { ctx ->
+            val previewView          = PreviewView(ctx)
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
 
             cameraProviderFuture.addListener({
@@ -323,12 +326,15 @@ private fun CameraPreview(
                 }
 
                 val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(1280, 720))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
 
                 imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                    @androidx.camera.core.ExperimentalGetImage
+                    if (!estaEscaneandoActivo) {
+                        imageProxy.close()
+                        return@setAnalyzer
+                    }
+
                     val mediaImage = imageProxy.image
                     if (mediaImage != null) {
                         val image = InputImage.fromMediaImage(
@@ -337,10 +343,11 @@ private fun CameraPreview(
                         )
                         scanner.process(image)
                             .addOnSuccessListener { barcodes ->
-                                barcodes.firstOrNull { it.valueType == Barcode.TYPE_TEXT || it.rawValue != null }
+                                barcodes
+                                    .firstOrNull { it.rawValue != null }
                                     ?.rawValue
                                     ?.let { onQrDetectado(it) }
-                             }
+                            }
                             .addOnCompleteListener { imageProxy.close() }
                     } else {
                         imageProxy.close()

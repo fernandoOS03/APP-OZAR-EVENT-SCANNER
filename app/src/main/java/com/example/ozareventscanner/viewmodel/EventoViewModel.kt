@@ -2,139 +2,255 @@ package com.example.ozareventscanner.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.ozareventscanner.data.ParticipanteDao
 import com.example.ozareventscanner.data.ParticipanteEntity
-import com.example.ozareventscanner.network.CodigoRequest
-import com.example.ozareventscanner.network.RetrofitClient
+import com.example.ozareventscanner.data.ParticipanteRepository
+import com.example.ozareventscanner.data.ScanResultado
+import com.example.ozareventscanner.data.SyncStats
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-/**
- * Estado de la UI para la Pantalla 2.
- * El ViewModel expone este sealed class para que la UI reaccione de forma declarativa.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// UI State — Registro / Vinculación de Evento (Pestaña "Agregar Evento")
+// ─────────────────────────────────────────────────────────────────────────────
+
 sealed class RegistroUiState {
-    /** Estado inicial — el usuario aún no ha enviado ningún código. */
     object Idle : RegistroUiState()
-
-    /** El POST está en vuelo (mostramos loading indicator). */
     object Cargando : RegistroUiState()
-
-    /**
-     * El backend respondió exitosamente y el participante ya fue guardado en Room.
-     * @param nombre Nombre del participante devuelto por el backend.
-     */
     data class Exito(val nombre: String) : RegistroUiState()
-
-    /**
-     * Algo salió mal (sin red, backend caído, código inválido…).
-     * @param mensaje Texto legible para mostrar en la UI.
-     */
     data class Error(val mensaje: String) : RegistroUiState()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UI State — Lector QR
+// ─────────────────────────────────────────────────────────────────────────────
+
+sealed class ScanUiState {
+    object Idle : ScanUiState()
+    object Procesando : ScanUiState()
+    object FormatoInvalido : ScanUiState()
+    data class Valido(val nombre: String) : ScanUiState()
+    data class YaEscaneado(val nombre: String) : ScanUiState()
+    object NoEncontrado : ScanUiState()
+    data class ErrorScan(val mensaje: String) : ScanUiState()
+}
+
 /**
- * ViewModel de la Pantalla 2 (Ingreso de Código).
- *
- * Flujo:
- *  1. La UI llama a [registrarCodigo] con el código ingresado por el usuario.
- *  2. Se hace POST al backend vía Retrofit.
- *  3. Si tiene éxito → se guarda el ParticipanteEntity en Room y se emite [RegistroUiState.Exito].
- *  4. Si falla       → se emite [RegistroUiState.Error] con el mensaje correspondiente.
- *
- * @param participanteDao DAO de Room para persistencia local.
+ * Datos completos para el ModalBottomSheet de resultado de escaneo
+ * (para verificación de identidad del participante).
  */
-class EventoViewModel(private val participanteDao: ParticipanteDao) : ViewModel() {
+data class ScanModalData(
+    val estado: ScanUiState,
+    val idParticipante: String,
+    val nombre: String,
+    val timestamp: Long = System.currentTimeMillis(),
+    val entidad: ParticipanteEntity? = null
+)
 
-    // -------------------------------------------------------------------------
-    // Estado reactivo (StateFlow → la UI observa con collectAsState())
-    // -------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// UI State — Sincronización Manual (Pestaña "Perfil / Sincronización")
+// ─────────────────────────────────────────────────────────────────────────────
 
+sealed class SyncUiState {
+    object Idle : SyncUiState()
+    object Sincronizando : SyncUiState()
+    data class Exito(val stats: SyncStats) : SyncUiState()
+    data class Error(val mensaje: String) : SyncUiState()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ViewModel Principal
+// ─────────────────────────────────────────────────────────────────────────────
+
+class EventoViewModel(private val repository: ParticipanteRepository) : ViewModel() {
+
+    // ── Estado: Registro / Agregar Evento ─────────────────────────────────────
     private val _uiState = MutableStateFlow<RegistroUiState>(RegistroUiState.Idle)
     val uiState: StateFlow<RegistroUiState> = _uiState
 
-    // -------------------------------------------------------------------------
-    // Lógica principal
-    // -------------------------------------------------------------------------
+    // ── Estado: Escaneo QR ────────────────────────────────────────────────────
+    private val _scanState = MutableStateFlow<ScanUiState>(ScanUiState.Idle)
+    val scanState: StateFlow<ScanUiState> = _scanState
 
-    /**
-     * Registra un código enviándolo al backend y guardando la respuesta en Room.
-     *
-     * @param codigo Código alfanumérico ingresado/escaneado por el usuario.
-     */
+    private val _scanModalData = MutableStateFlow<ScanModalData?>(null)
+    val scanModalData: StateFlow<ScanModalData?> = _scanModalData
+
+    private var ultimoCodigoEscaneado: String? = null
+
+    // ── Estado: Contingencia / Lista de Participantes ────────────────────────
+    private val _listaParticipantes = MutableStateFlow<List<ParticipanteEntity>>(emptyList())
+    val listaParticipantes: StateFlow<List<ParticipanteEntity>> = _listaParticipantes
+
+    private val _busquedaQuery = MutableStateFlow("")
+    val busquedaQuery: StateFlow<String> = _busquedaQuery
+
+    private val _cargandoParticipantes = MutableStateFlow(false)
+    val cargandoParticipantes: StateFlow<Boolean> = _cargandoParticipantes
+
+    // ── Estado: Perfil & Sincronización ──────────────────────────────────────
+    private val _syncUiState = MutableStateFlow<SyncUiState>(SyncUiState.Idle)
+    val syncUiState: StateFlow<SyncUiState> = _syncUiState
+
+    private val _hayInternet = MutableStateFlow(true)
+    val hayInternet: StateFlow<Boolean> = _hayInternet
+
+    private val _pendientesSyncCount = MutableStateFlow(0)
+    val pendientesSyncCount: StateFlow<Int> = _pendientesSyncCount
+
+    init {
+        verificarConexion()
+        cargarParticipantes()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pestaña "Agregar Evento": Registro de código de evento / participante
+    // ─────────────────────────────────────────────────────────────────────────
+
     fun registrarCodigo(codigo: String) {
-        // Validación básica antes de hacer la llamada de red
-        if (codigo.isBlank()) {
+        val codigoLimpio = codigo.trim()
+        if (codigoLimpio.isBlank()) {
             _uiState.value = RegistroUiState.Error("El código no puede estar vacío.")
             return
         }
 
         viewModelScope.launch {
             _uiState.value = RegistroUiState.Cargando
-
             try {
-                // ── Paso 1: Llamada POST al backend ─────────────────────────
-                val respuesta = RetrofitClient.apiService.registrarParticipante(
-                    CodigoRequest(codigo = codigo.trim())
-                )
-
-                // ── Paso 2: Guardar en Room ──────────────────────────────────
-                val entidad = ParticipanteEntity(
-                    idParticipante   = respuesta.idParticipante,
-                    nombre           = respuesta.nombre,
-                    beneficioEntregado = respuesta.beneficioEntregado   // siempre false al registrar
-                )
-                participanteDao.insertarParticipantes(listOf(entidad))
-
-                // ── Paso 3: Notificar éxito a la UI ─────────────────────────
-                _uiState.value = RegistroUiState.Exito(nombre = respuesta.nombre)
-
+                val nombre = repository.registrarCodigoRemoto(codigoLimpio)
+                _uiState.value = RegistroUiState.Exito(nombre = nombre)
+                cargarParticipantes()
             } catch (e: retrofit2.HttpException) {
-                // El servidor respondió con 4xx / 5xx
-                val codigoHttp = e.code()
-                _uiState.value = when (codigoHttp) {
-                    404 -> RegistroUiState.Error("Código no encontrado en el sistema.")
-                    409 -> RegistroUiState.Error("Este participante ya fue registrado.")
-                    else -> RegistroUiState.Error("Error del servidor ($codigoHttp). Intenta de nuevo.")
+                val code = e.code()
+                _uiState.value = when (code) {
+                    404  -> RegistroUiState.Error("Código no encontrado en el servidor.")
+                    409  -> RegistroUiState.Error("Este código ya fue registrado anteriormente.")
+                    else -> RegistroUiState.Error("Error del servidor ($code). Intenta nuevamente.")
                 }
             } catch (e: java.net.UnknownHostException) {
-                // Sin conexión a internet o DNS no resuelve
                 _uiState.value = RegistroUiState.Error("Sin conexión a internet. Verifica tu red.")
             } catch (e: java.net.SocketTimeoutException) {
-                // El backend tardó demasiado
-                _uiState.value = RegistroUiState.Error("Tiempo de espera agotado. Intenta de nuevo.")
+                _uiState.value = RegistroUiState.Error("Tiempo de espera agotado.")
             } catch (e: Exception) {
-                // Cualquier otro error inesperado
-                _uiState.value = RegistroUiState.Error("Error inesperado: ${e.localizedMessage}")
+                _uiState.value = RegistroUiState.Error("Error: ${e.localizedMessage}")
             }
         }
     }
 
-    /**
-     * Reinicia el estado a Idle (útil para limpiar el mensaje de error/éxito).
-     */
     fun resetearEstado() {
         _uiState.value = RegistroUiState.Idle
     }
 
-    // -------------------------------------------------------------------------
-    // Función heredada (compatibilidad con código anterior si se usa en otro lado)
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // Escaneo QR + BottomSheet de Verificación de Identidad
+    // ─────────────────────────────────────────────────────────────────────────
 
-    /** @deprecated Usar [registrarCodigo] en su lugar. */
-    fun procesarRequestBackend(uuid: String, nombreBackend: String) {
-        val participante = ParticipanteEntity(
-            idParticipante    = uuid,
-            nombre            = nombreBackend,
-            beneficioEntregado = false
-        )
+    fun validarYMarcarParticipante(rawQrValue: String) {
+        if (rawQrValue == ultimoCodigoEscaneado && _scanModalData.value != null) return
+        ultimoCodigoEscaneado = rawQrValue
+
         viewModelScope.launch {
+            _scanState.value = ScanUiState.Procesando
+            val resultado = repository.registrarEscaneo(rawQrValue)
+            val entidad = repository.buscarParticipantePorId(rawQrValue)
+
+            val nuevoEstado = when (resultado) {
+                is ScanResultado.FormatoInvalido -> ScanUiState.FormatoInvalido
+                is ScanResultado.NoEncontrado    -> ScanUiState.NoEncontrado
+                is ScanResultado.YaEscaneado     -> ScanUiState.YaEscaneado(resultado.nombre)
+                is ScanResultado.Valido          -> ScanUiState.Valido(resultado.nombre)
+                is ScanResultado.Error           -> ScanUiState.ErrorScan(resultado.mensaje)
+            }
+
+            _scanState.value = nuevoEstado
+
+            val nombreAMostrar = when (resultado) {
+                is ScanResultado.Valido -> resultado.nombre
+                is ScanResultado.YaEscaneado -> resultado.nombre
+                else -> entidad?.nombre ?: ""
+            }
+
+            _scanModalData.value = ScanModalData(
+                estado         = nuevoEstado,
+                idParticipante = rawQrValue,
+                nombre         = nombreAMostrar,
+                entidad        = entidad
+            )
+
+            // Refrescar lista local
+            cargarParticipantes()
+        }
+    }
+
+    fun cerrarModalScan() {
+        _scanModalData.value = null
+        _scanState.value = ScanUiState.Idle
+        ultimoCodigoEscaneado = null
+    }
+
+    fun resetearScan() {
+        _scanState.value = ScanUiState.Idle
+        _scanModalData.value = null
+        ultimoCodigoEscaneado = null
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Contingencia: Búsqueda y Entrega Manual de Beneficios
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fun actualizarBusqueda(query: String) {
+        _busquedaQuery.value = query
+        cargarParticipantes(query)
+    }
+
+    fun cargarParticipantes(query: String = _busquedaQuery.value) {
+        viewModelScope.launch {
+            _cargandoParticipantes.value = true
             try {
-                participanteDao.insertarParticipantes(listOf(participante))
+                val lista = repository.buscarParticipantes(query)
+                _listaParticipantes.value = lista
             } catch (e: Exception) {
-                // Manejo de error pendiente
+                _listaParticipantes.value = emptyList()
+            } finally {
+                _cargandoParticipantes.value = false
             }
         }
+    }
+
+    fun entregarBeneficioManual(idParticipante: String, onResultado: (ScanResultado) -> Unit = {}) {
+        viewModelScope.launch {
+            val res = repository.entregarBeneficioManual(idParticipante)
+            cargarParticipantes()
+            onResultado(res)
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pestaña "Perfil / Sincronización": Estado de Conectividad y Sync Forzada
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fun verificarConexion() {
+        _hayInternet.value = repository.hayConexion()
+    }
+
+    fun forzarSincronizacion() {
+        viewModelScope.launch {
+            verificarConexion()
+            _syncUiState.value = SyncUiState.Sincronizando
+
+            val resultado = repository.sincronizarCompleto()
+            if (resultado.isSuccess) {
+                val stats = resultado.getOrThrow()
+                _syncUiState.value = SyncUiState.Exito(stats)
+                cargarParticipantes()
+            } else {
+                _syncUiState.value = SyncUiState.Error(
+                    resultado.exceptionOrNull()?.localizedMessage ?: "Error de sincronización"
+                )
+            }
+        }
+    }
+
+    fun limpiarEstadoSync() {
+        _syncUiState.value = SyncUiState.Idle
     }
 }

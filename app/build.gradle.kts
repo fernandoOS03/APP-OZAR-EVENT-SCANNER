@@ -69,11 +69,17 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:$retrofit_version")
     implementation("com.squareup.retrofit2:converter-gson:$retrofit_version")
 
+    // OkHttp (explícito para usar extension functions de Kotlin en el mock interceptor)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
     // ViewModel + Compose integration
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
 
     // Navigation Compose
     implementation("androidx.navigation:navigation-compose:2.7.5")
+
+    // WorkManager — sincronización en segundo plano
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 
 
     implementation("androidx.core:core-ktx:1.15.0")
