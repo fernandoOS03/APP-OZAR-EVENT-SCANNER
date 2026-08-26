@@ -4,20 +4,16 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
 
 /**
- * DAO de Room para operaciones sobre la tabla `participantes`.
- *
- * Operaciones agrupadas:
- *  ▸ CRUD básico: insertarParticipantes, buscarParticipante, obtenerTodos.
- *  ▸ Escaneo: actualizarBeneficio, marcarEscaneoLocal.
- *  ▸ Sincronización: obtenerPendientesSync, marcarLoteComoSincronizado,
- *                    revertirEscaneoRechazado, sincronizarDesdeBackend.
+ * DAO de Room para operaciones sobre las tablas `participantes` y `escaneos`.
+ * Optimizado para rendimiento crítico con 10,000+ registros.
  */
 @Dao
 interface ParticipanteDao {
 
-    // ── CRUD básico ───────────────────────────────────────────────────────────
+    // ── CRUD y Consultas de Participantes ──────────────────────────────────────
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertarParticipantes(participantes: List<ParticipanteEntity>)
@@ -28,77 +24,100 @@ interface ParticipanteDao {
     @Query("SELECT * FROM participantes ORDER BY nombre ASC")
     suspend fun obtenerTodos(): List<ParticipanteEntity>
 
-    /** Busca participantes por nombre o ID/DNI (case-insensitive). */
+    @Query("SELECT * FROM participantes ORDER BY nombre ASC")
+    fun observarTodos(): Flow<List<ParticipanteEntity>>
+
+    @Query("SELECT COUNT(*) FROM participantes")
+    fun observarTotalParticipantes(): Flow<Int>
+
+    /**
+     * Búsqueda optimizada por índice.
+     * En SQLite, 'documento LIKE :query || %' o 'idParticipante LIKE :query || %' aprovecha
+     * directamente el índice B-Tree en O(log N) para búsquedas numéricas de DNI/ID.
+     * 'nombre LIKE % || :query || %' filtra por coincidencia textual sobre resultados indexados.
+     */
+    @Query("""
+        SELECT * FROM participantes 
+        WHERE (:query = '' 
+           OR documento LIKE :query || '%' 
+           OR idParticipante LIKE :query || '%' 
+           OR nombre LIKE '%' || :query || '%')
+        ORDER BY nombre ASC
+    """)
+    fun buscarParticipantesFlow(query: String): Flow<List<ParticipanteEntity>>
+
     @Query("""
         SELECT * FROM participantes 
         WHERE LOWER(nombre) LIKE '%' || LOWER(:query) || '%' 
+           OR LOWER(documento) LIKE '%' || LOWER(:query) || '%' 
            OR LOWER(idParticipante) LIKE '%' || LOWER(:query) || '%' 
         ORDER BY nombre ASC
     """)
     suspend fun buscarPorNombreOId(query: String): List<ParticipanteEntity>
 
-    // ── Escaneo ───────────────────────────────────────────────────────────────
+    // ── Escaneo y Entrega Manual (Offline-First) ──────────────────────────────
 
-    /** Actualiza solo el flag de beneficio (usado en flujos de corrección). */
-    @Query("UPDATE participantes SET beneficioEntregado = :entregado WHERE idParticipante = :id")
-    suspend fun actualizarBeneficio(id: String, entregado: Boolean)
-
-    /**
-     * Registra un escaneo QR local con timestamp.
-     * Establece [beneficioEntregado] = true, [pendienteSubida] = true y guarda el timestamp.
-     * Este es el primer paso del flujo offline-first antes de sincronizar con el backend.
-     */
     @Query("""
         UPDATE participantes
         SET beneficioEntregado    = 1,
             timestampEscaneo      = :timestamp,
+            isSynced              = 0,
             pendienteSubida       = 1,
             sincronizadoConBackend = 0
         WHERE idParticipante = :id
     """)
-    suspend fun marcarEscaneoLocal(id: String, timestamp: Long)
+    suspend fun marcarEscaneoLocal(id: String, timestamp: Long = System.currentTimeMillis())
+
+    // ── Escaneos Individuales ──────────────────────────────────────────────────
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertarEscaneo(escaneo: EscaneoEntity): Long
+
+    @Query("SELECT * FROM escaneos")
+    fun observarTodosLosEscaneos(): Flow<List<EscaneoEntity>>
+
+    @Query("SELECT * FROM escaneos WHERE idParticipante = :idParticipante")
+    suspend fun obtenerEscaneosPorParticipante(idParticipante: String): List<EscaneoEntity>
+
+    @Query("SELECT * FROM escaneos WHERE isSynced = 0")
+    suspend fun obtenerEscaneosPendientes(): List<EscaneoEntity>
+
+    @Query("UPDATE escaneos SET isSynced = 1 WHERE id IN (:ids)")
+    suspend fun marcarEscaneosSincronizados(ids: List<Long>)
 
     // ── Sincronización ────────────────────────────────────────────────────────
 
-    /**
-     * Devuelve todos los registros con [pendienteSubida] = true.
-     * Son los que se enviarán en el siguiente POST /sync/upload.
-     */
-    @Query("SELECT * FROM participantes WHERE pendienteSubida = 1")
+    @Query("SELECT * FROM participantes WHERE isSynced = 0 OR pendienteSubida = 1")
     suspend fun obtenerPendientesSync(): List<ParticipanteEntity>
 
-    /**
-     * Marca un lote de participantes como sincronizados tras la confirmación del backend.
-     * Se llama con los IDs devueltos en [SyncUploadResponse.resultados] donde validado = true.
-     */
     @Query("""
         UPDATE participantes
-        SET sincronizadoConBackend = 1,
+        SET isSynced               = 1,
+            sincronizadoConBackend = 1,
             pendienteSubida        = 0
         WHERE idParticipante IN (:ids)
     """)
     suspend fun marcarLoteComoSincronizado(ids: List<String>)
 
-    /**
-     * Revierte el escaneo de un participante rechazado por el backend.
-     * Ocurre en conflictos de doble escaneo: otro dispositivo escaneó antes (menor timestamp).
-     * Resultado: [beneficioEntregado] = false, [pendienteSubida] = false.
-     */
     @Query("""
         UPDATE participantes
-        SET beneficioEntregado    = 0,
-            timestampEscaneo      = NULL,
-            pendienteSubida       = 0,
+        SET beneficioEntregado     = 0,
+            timestampEscaneo       = NULL,
+            isSynced               = 1,
+            pendienteSubida        = 0,
             sincronizadoConBackend = 1
         WHERE idParticipante = :id
     """)
     suspend fun revertirEscaneoRechazado(id: String)
 
-    /**
-     * Reemplaza Room con el estado canónico descargado del servidor (GET /sync/download).
-     * Usa REPLACE para actualizar registros existentes y agregar nuevos.
-     * Los registros del servidor tienen siempre [sincronizadoConBackend] = true.
-     */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun sincronizarDesdeBackend(participantes: List<ParticipanteEntity>)
+
+    // ── Purga Total de Datos ──────────────────────────────────────────────────
+
+    @Query("DELETE FROM participantes")
+    suspend fun vaciarParticipantes()
+
+    @Query("DELETE FROM escaneos")
+    suspend fun vaciarEscaneos()
 }
