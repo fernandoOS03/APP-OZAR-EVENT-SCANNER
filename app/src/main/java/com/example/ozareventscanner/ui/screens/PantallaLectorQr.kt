@@ -44,6 +44,9 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Paleta del lector QR
+// ─────────────────────────────────────────────────────────────────────────────
 private val QrFondo    = Color(0xFF0F172A)
 private val QrAccent   = ColorPrimary
 private val QrVerde    = ColorSuccess
@@ -53,18 +56,18 @@ private val QrRojo     = ColorError
 /**
  * Pantalla de Escaneo QR con CameraX y ML Kit.
  *
- * Al detectar un código QR, actualiza Room offline-first y muestra el resultado en
- * el ModalBottomSheet.
+ * Al detectar un código QR, consulta Room de forma offline-first e invoca
+ * el [ModalBottomSheetResultadoScan] para mostrar el resultado y validar
+ * la identidad del participante.
  */
 @Composable
 fun PantallaLectorQr(
-    idBeneficio: String = "",
     viewModel: EventoViewModel,
     onVolver: () -> Unit
 ) {
-    val context       = LocalContext.current
-    val scanState     by viewModel.scanState.collectAsState()
-    val scanModalData by viewModel.scanModalData.collectAsState()
+    val context        = LocalContext.current
+    val scanState      by viewModel.scanState.collectAsState()
+    val scanModalData  by viewModel.scanModalData.collectAsState()
 
     var tienePermiso by remember {
         mutableStateOf(
@@ -92,7 +95,7 @@ fun PantallaLectorQr(
                 modifier = Modifier.fillMaxSize(),
                 estaEscaneandoActivo = scanState is ScanUiState.Idle && scanModalData == null,
                 onQrDetectado = { codigo ->
-                    viewModel.validarYMarcarParticipante(codigo, idBeneficio)
+                    viewModel.validarYMarcarParticipante(codigo)
                 }
             )
 
@@ -223,6 +226,9 @@ fun PantallaLectorQr(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Marco de Escaneo Reactivo
+// ─────────────────────────────────────────────────────────────────────────────
 @Composable
 private fun MarcoEscaneo(
     scanState: ScanUiState,
@@ -266,6 +272,7 @@ private fun MarcoEscaneo(
             )
         }
 
+        // Esquinas decorativas
         val cornerSize  = 24.dp
         val cornerWidth = 3.dp
 
@@ -288,6 +295,9 @@ private fun MarcoEscaneo(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CameraX Preview + ML Kit
+// ─────────────────────────────────────────────────────────────────────────────
 @Composable
 private fun CameraPreviewWithValidation(
     modifier: Modifier = Modifier,
