@@ -1,15 +1,22 @@
 package com.example.ozareventscanner.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.*
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -21,6 +28,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -29,345 +38,569 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ozareventscanner.ui.components.ZendovBrand
+import com.example.ozareventscanner.ui.components.ZendovIcons
 import com.example.ozareventscanner.ui.theme.*
 import com.example.ozareventscanner.viewmodel.AuthViewModel
 import com.example.ozareventscanner.viewmodel.LoginUiState
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Colores locales de la pantalla de login
-// ─────────────────────────────────────────────────────────────────────────────
-private val LoginFondo1   = Color(0xFF1E3A8A) // Azul marino profundo
-private val LoginFondo2   = Color(0xFF2563EB) // Azul brillante
-private val LoginFondo3   = Color(0xFF0F172A) // Casi negro
-private val LoginCard     = Color(0xFFFFFFFF)
-private val LoginAccent   = ColorPrimary
-
 /**
- * Pantalla de Login — acceso a la aplicación.
- *
- * ▸ Credenciales de demo:
- *     Email    : admin@ozar.com
- *     Password : ozar2025
- *
- * ▸ Cuando el backend de auth esté listo, conectar [AuthViewModel.iniciarSesion]
- *   al endpoint real y eliminar las credenciales hardcodeadas.
- *
- * @param viewModel   ViewModel de autenticación.
- * @param onLoginExitoso Callback que navega a la pantalla principal tras el login exitoso.
+ * Pantalla de Acceso — Zendov Scanner.
+ * Implementación 1:1 del diseño oficial en Figma Make.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PantallaLogin(
     viewModel: AuthViewModel,
     onLoginExitoso: () -> Unit
 ) {
-    // ── Estado local ──────────────────────────────────────────────────────────
-    var email           by remember { mutableStateOf("") }
-    var password        by remember { mutableStateOf("") }
-    var mostrarPassword by remember { mutableStateOf(false) }
-    var pantallaVisible by remember { mutableStateOf(false) }
+    var mostrarBottomSheet by remember { mutableStateOf(false) }
+    val loginState by viewModel.loginState.collectAsState()
 
-    val loginState     by viewModel.loginState.collectAsState()
-    val keyboard        = LocalSoftwareKeyboardController.current
-    val focusManager    = LocalFocusManager.current
-
-    // Trigger de animación de entrada
-    LaunchedEffect(Unit) { pantallaVisible = true }
-
-    // Reaccionar al estado de login
     LaunchedEffect(loginState) {
         if (loginState is LoginUiState.Autenticado) {
             onLoginExitoso()
         }
     }
 
-    // ── Fondo degradado ───────────────────────────────────────────────────────
+    if (mostrarBottomSheet) {
+        BackHandler {
+            viewModel.limpiarError()
+            mostrarBottomSheet = false
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0.0f to LoginFondo3,
-                        0.5f to LoginFondo1,
-                        1.0f to LoginFondo2
-                    )
-                )
-            )
+            .background(GrayDark2)
     ) {
+        // Decoración de fondo Figma: Resplandor radial y órbitas
+        FondoOrbitasFigma()
 
-        // Círculos decorativos de fondo
-        Box(
-            modifier = Modifier
-                .size(300.dp)
-                .offset(x = (-80).dp, y = (-80).dp)
-                .background(
-                    LoginFondo2.copy(alpha = 0.15f),
-                    RoundedCornerShape(50)
-                )
-        )
-        Box(
-            modifier = Modifier
-                .size(200.dp)
-                .align(Alignment.BottomEnd)
-                .offset(x = 60.dp, y = 60.dp)
-                .background(
-                    LoginAccent.copy(alpha = 0.1f),
-                    RoundedCornerShape(50)
-                )
+        // Pantalla de Bienvenida siempre como fondo principal
+        PantallaBienvenidaZendov(
+            onComenzar = {
+                viewModel.limpiarError()
+                mostrarBottomSheet = true
+            }
         )
 
-        // ── Contenido principal ───────────────────────────────────────────────
+        // Al pulsar "Comenzar", la tarjeta blanca de login emerge hasta justo debajo del logo zendov (~89% altura)
+        // cubriendo la pantalla completa hacia abajo, 1:1 con Figma Make
         AnimatedVisibility(
-            visible = pantallaVisible,
-            enter   = fadeIn(tween(600)) + slideInVertically(tween(600)) { it / 3 }
+            visible = mostrarBottomSheet,
+            enter = slideInVertically(
+                initialOffsetY = { it },
+                animationSpec = tween(350, easing = FastOutSlowInEasing)
+            ),
+            exit = slideOutVertically(
+                targetOffsetY = { it },
+                animationSpec = tween(250, easing = FastOutSlowInEasing)
+            ),
+            modifier = Modifier.fillMaxSize()
         ) {
-            Column(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                    .clickable {
+                        viewModel.limpiarError()
+                        mostrarBottomSheet = false
+                    }
             ) {
-
-                // ── Logo + Nombre ─────────────────────────────────────────────
-                Box(
+                // Tarjeta Blanca de Formulario: cubre exactamente el ~88% de la pantalla hasta el fondo
+                Surface(
                     modifier = Modifier
-                        .size(80.dp)
-                        .background(
-                            Brush.radialGradient(listOf(LoginFondo2, LoginAccent)),
-                            RoundedCornerShape(24.dp)
-                        ),
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.88f)
+                        .align(Alignment.BottomCenter)
+                        .clickable(enabled = false) {}, // Evita dismiss al tocar dentro del formulario
+                    color = Color.White,
+                    shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
+                    shadowElevation = 16.dp
                 ) {
-                    Icon(
-                        imageVector        = Icons.Default.QrCodeScanner,
-                        contentDescription = "Logo Ozar",
-                        tint               = Color.White,
-                        modifier           = Modifier.size(44.dp)
+                    PantallaFormularioZendov(
+                        viewModel = viewModel,
+                        loginState = loginState,
+                        onRegresar = {
+                            viewModel.limpiarError()
+                            mostrarBottomSheet = false
+                        }
                     )
-                }
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                Text(
-                    text       = "Ozar Event Scanner",
-                    fontSize   = 26.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color      = Color.White,
-                    textAlign  = TextAlign.Center
-                )
-                Text(
-                    text    = "Inicia sesión para continuar",
-                    fontSize = 14.sp,
-                    color   = Color.White.copy(alpha = 0.65f),
-                    modifier = Modifier.padding(top = 6.dp)
-                )
-
-                Spacer(modifier = Modifier.height(36.dp))
-
-                // ── Tarjeta del formulario ────────────────────────────────────
-                Card(
-                    modifier  = Modifier.fillMaxWidth(),
-                    shape     = RoundedCornerShape(24.dp),
-                    colors    = CardDefaults.cardColors(containerColor = LoginCard),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(28.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-
-                        // Título de la tarjeta
-                        Text(
-                            text       = "Bienvenido",
-                            fontSize   = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            color      = ColorTextPrimary
-                        )
-                        Text(
-                            text    = "Ingresa tus credenciales",
-                            fontSize = 13.sp,
-                            color   = ColorTextSecondary
-                        )
-
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        // ── Campo Email ───────────────────────────────────────
-                        OutlinedTextField(
-                            value          = email,
-                            onValueChange  = { email = it; viewModel.limpiarError() },
-                            label          = { Text("Correo electrónico") },
-                            placeholder    = { Text("admin@ozar.com") },
-                            leadingIcon    = {
-                                Icon(
-                                    Icons.Default.Email,
-                                    contentDescription = null,
-                                    tint = LoginAccent
-                                )
-                            },
-                            singleLine     = true,
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Email,
-                                imeAction    = ImeAction.Next
-                            ),
-                            keyboardActions = KeyboardActions(
-                                onNext = { focusManager.moveFocus(FocusDirection.Down) }
-                            ),
-                            enabled = loginState !is LoginUiState.Autenticado,
-                            colors  = outlinedFieldColors(),
-                            shape   = RoundedCornerShape(14.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        // ── Campo Contraseña ──────────────────────────────────
-                        OutlinedTextField(
-                            value         = password,
-                            onValueChange = { password = it; viewModel.limpiarError() },
-                            label         = { Text("Contraseña") },
-                            leadingIcon   = {
-                                Icon(
-                                    Icons.Default.Lock,
-                                    contentDescription = null,
-                                    tint = LoginAccent
-                                )
-                            },
-                            trailingIcon  = {
-                                IconButton(onClick = { mostrarPassword = !mostrarPassword }) {
-                                    Icon(
-                                        imageVector = if (mostrarPassword)
-                                            Icons.Default.VisibilityOff
-                                        else
-                                            Icons.Default.Visibility,
-                                        contentDescription = if (mostrarPassword) "Ocultar" else "Mostrar",
-                                        tint = ColorTextSecondary
-                                    )
-                                }
-                            },
-                            singleLine           = true,
-                            visualTransformation = if (mostrarPassword)
-                                VisualTransformation.None
-                            else
-                                PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Password,
-                                imeAction    = ImeAction.Done
-                            ),
-                            keyboardActions = KeyboardActions(
-                                onDone = {
-                                    keyboard?.hide()
-                                    viewModel.iniciarSesion(email, password)
-                                }
-                            ),
-                            enabled  = loginState !is LoginUiState.Autenticado,
-                            colors   = outlinedFieldColors(),
-                            shape    = RoundedCornerShape(14.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        // ── Mensaje de error ──────────────────────────────────
-                        AnimatedVisibility(visible = loginState is LoginUiState.ErrorCredenciales) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(ColorErrorBg)
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Error,
-                                    contentDescription = null,
-                                    tint     = ColorError,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Text(
-                                    text     = (loginState as? LoginUiState.ErrorCredenciales)?.mensaje ?: "",
-                                    color    = ColorError,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-
-                        // ── Botón Iniciar Sesión ──────────────────────────────
-                        Button(
-                            onClick = {
-                                keyboard?.hide()
-                                viewModel.iniciarSesion(email, password)
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp),
-                            shape  = RoundedCornerShape(14.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = LoginAccent,
-                                contentColor   = Color.White
-                            ),
-                            enabled = email.isNotBlank() && password.isNotBlank()
-                        ) {
-                            Text(
-                                text       = "Iniciar Sesión",
-                                fontSize   = 16.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(28.dp))
-
-                // ── Hint de credenciales (solo en modo demo) ──────────────────
-                Card(
-                    modifier  = Modifier.fillMaxWidth(),
-                    shape     = RoundedCornerShape(16.dp),
-                    colors    = CardDefaults.cardColors(
-                        containerColor = Color.White.copy(alpha = 0.08f)
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Info,
-                            contentDescription = null,
-                            tint     = Color.White.copy(alpha = 0.7f),
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Column {
-                            Text(
-                                text       = "Credenciales de demostración",
-                                color      = Color.White.copy(alpha = 0.9f),
-                                fontSize   = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text    = "admin@ozar.com  /  ozar2025",
-                                color   = Color.White.copy(alpha = 0.65f),
-                                fontSize = 11.sp,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                        }
-                    }
                 }
             }
         }
     }
 }
 
-// ── Colores reutilizables para los OutlinedTextField ─────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// Pantalla 1: Bienvenida (Figma Make)
+// ═════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun PantallaBienvenidaZendov(
+    onComenzar: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        // Barra Superior: Brand Logo
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ZendovBrand(mostrarProduct = true)
+        }
+
+        // Centro: Headline y Explicación
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 24.dp)
+        ) {
+            // Eyebrow con punto verde en vivo
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(bottom = 16.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .background(GreenBase, CircleShape)
+                )
+                Text(
+                    text = "GESTIÓN DE EVENTOS EN VIVO",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = GreenLight1,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 1.8.sp
+                )
+            }
+
+            // Título principal con estilo editorial Figma
+            Text(
+                text = "Todo listo para",
+                fontSize = 42.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                lineHeight = 44.sp,
+                letterSpacing = (-0.05).sp
+            )
+            Text(
+                text = "recibirlos.",
+                fontSize = 44.sp,
+                fontWeight = FontWeight.Normal,
+                fontStyle = FontStyle.Italic,
+                fontFamily = FontFamily.Serif,
+                color = GreenLight1,
+                lineHeight = 46.sp,
+                letterSpacing = (-0.04).sp
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Text(
+                text = "Sistema de escaneo para el control de asistencia y entrega de beneficios en eventos.",
+                fontSize = 14.sp,
+                color = GrayBase,
+                lineHeight = 22.sp
+            )
+        }
+
+        // Parte Inferior: Micro-stats, Botón Comenzar y Versión
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            // Micro-stats de validación y sincronización
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Rápido",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Validación instantánea",
+                        fontSize = 11.sp,
+                        color = GrayBase
+                    )
+                }
+
+                // Divisor vertical sutil
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(30.dp)
+                        .background(Color.White.copy(alpha = 0.12f))
+                )
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Seguro",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Datos sincronizados",
+                        fontSize = 11.sp,
+                        color = GrayBase
+                    )
+                }
+            }
+
+            // Botón Comenzar con texto centrado horizontalmente
+            Button(
+                onClick = onComenzar,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = GreenDark1,
+                    contentColor = Color.White
+                ),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
+            ) {
+                Text(
+                    text = "Comenzar",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            // Indicador de versión centrado
+            Text(
+                text = "Zendov Scanner · v1.0.0",
+                fontSize = 11.sp,
+                color = GrayBase.copy(alpha = 0.6f),
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp)
+            )
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Formulario Comenzar (Figma Make Sheet)
+// ═════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun PantallaFormularioZendov(
+    viewModel: AuthViewModel,
+    loginState: LoginUiState,
+    onRegresar: () -> Unit
+) {
+    var dni by remember { mutableStateOf("") }
+    var pin by remember { mutableStateOf("") }
+    var mostrarPin by remember { mutableStateOf(false) }
+
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp)
+            .padding(top = 16.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Barra Superior del Sheet: Botón "< Regresar" (1:1 Figma Make)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onRegresar() }
+                    .padding(vertical = 4.dp, horizontal = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = ZendovIcons.ArrowLeft,
+                    contentDescription = "Regresar",
+                    tint = ColorForegroundMuted,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "Regresar",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = ColorForegroundMuted
+                )
+            }
+        }
+
+        // Títulos del Formulario: Centrados según Figma
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Comenzar",
+                fontSize = 30.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = ColorForeground,
+                textAlign = TextAlign.Center,
+                letterSpacing = (-0.04).sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Ingresa tus credenciales de staff",
+                fontSize = 14.sp,
+                color = ColorForegroundMuted,
+                textAlign = TextAlign.Center
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Campo: Documento de identidad (sin leadingIcon)
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "Documento de identidad",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = ColorForeground
+            )
+            OutlinedTextField(
+                value = dni,
+                onValueChange = {
+                    dni = it.filter { ch -> ch.isLetterOrDigit() }
+                    viewModel.limpiarError()
+                },
+                placeholder = {
+                    Text(
+                        "Ej. 12345678",
+                        color = ColorTextMuted,
+                        fontSize = 14.sp
+                    )
+                },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Next
+                ),
+                keyboardActions = KeyboardActions(
+                    onNext = { focusManager.moveFocus(FocusDirection.Down) }
+                ),
+                enabled = loginState !is LoginUiState.Cargando && loginState !is LoginUiState.Autenticado,
+                colors = outlinedFieldColors(),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        // Campo: PIN de acceso (sin leadingIcon)
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "PIN de acceso",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = ColorForeground
+            )
+            OutlinedTextField(
+                value = pin,
+                onValueChange = {
+                    if (it.length <= 6) {
+                        pin = it.filter { ch -> ch.isDigit() }
+                        viewModel.limpiarError()
+                    }
+                },
+                placeholder = {
+                    Text(
+                        "••••",
+                        color = ColorTextMuted,
+                        fontSize = 14.sp
+                    )
+                },
+                trailingIcon = {
+                    IconButton(onClick = { mostrarPin = !mostrarPin }) {
+                        Icon(
+                            imageVector = if (mostrarPin)
+                                Icons.Default.VisibilityOff
+                            else
+                                Icons.Default.Visibility,
+                            contentDescription = if (mostrarPin) "Ocultar PIN" else "Mostrar PIN",
+                            tint = ColorTextSecondary
+                        )
+                    }
+                },
+                singleLine = true,
+                visualTransformation = if (mostrarPin)
+                    VisualTransformation.None
+                else
+                    PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.NumberPassword,
+                    imeAction = ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        keyboard?.hide()
+                        viewModel.iniciarSesion(dni, pin)
+                    }
+                ),
+                enabled = loginState !is LoginUiState.Cargando && loginState !is LoginUiState.Autenticado,
+                colors = outlinedFieldColors(),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        // Alerta de Error de Credenciales
+        AnimatedVisibility(visible = loginState is LoginUiState.ErrorCredenciales) {
+            Surface(
+                color = StatusDangerSoft,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ErrorOutline,
+                        contentDescription = null,
+                        tint = StatusDanger,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = (loginState as? LoginUiState.ErrorCredenciales)?.mensaje
+                            ?: "Documento o PIN incorrecto",
+                        color = StatusDangerText,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Botón Iniciar sesión con flecha derecha
+        Button(
+            onClick = {
+                keyboard?.hide()
+                viewModel.iniciarSesion(dni, pin)
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = GreenDark2,
+                contentColor = Color.White
+            ),
+            enabled = dni.length >= 6 && pin.length >= 4 && loginState !is LoginUiState.Cargando
+        ) {
+            if (loginState is LoginUiState.Cargando) {
+                CircularProgressIndicator(
+                    color = GreenBase,
+                    strokeWidth = 2.5.dp,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Verificando credenciales...", fontSize = 15.sp)
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Iniciar sesión",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Decoración de Fondo Figma Make (Órbitas y Resplandor Radial)
+// ═════════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun FondoOrbitasFigma() {
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Resplandor radial verde esmeralda superior derecho
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .offset(x = 100.dp, y = (-40).dp)
+                .size(340.dp)
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            ZendovRadialGlow,
+                            Color.Transparent
+                        )
+                    ),
+                    CircleShape
+                )
+        )
+
+        // Órbita 1: Círculo grande con borde translúcido
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .offset(x = 140.dp, y = (-50).dp)
+                .size(380.dp)
+                .border(1.dp, ZendovOrbitBorder, CircleShape)
+        )
+
+        // Órbita 2: Círculo inferior izquierdo
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .offset(x = (-60).dp, y = (-120).dp)
+                .size(180.dp)
+                .border(1.dp, ZendovOrbitBorder, CircleShape)
+        )
+    }
+}
+
 @Composable
 private fun outlinedFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedBorderColor    = LoginAccent,
-    unfocusedBorderColor  = Color(0xFFE2E8F0),
-    cursorColor           = LoginAccent,
-    focusedTextColor      = ColorTextPrimary,
-    unfocusedTextColor    = ColorTextPrimary,
-    focusedLabelColor     = LoginAccent,
-    unfocusedLabelColor   = ColorTextSecondary,
-    focusedContainerColor = Color(0xFFF8FAFC),
-    unfocusedContainerColor = Color(0xFFF8FAFC)
+    focusedBorderColor = GreenDark2,
+    unfocusedBorderColor = ColorBorder,
+    cursorColor = GreenDark2,
+    focusedTextColor = ColorForeground,
+    unfocusedTextColor = ColorForeground,
+    focusedLabelColor = GreenDark2,
+    unfocusedLabelColor = ColorTextSecondary,
+    focusedContainerColor = GrayLight3,
+    unfocusedContainerColor = GrayLight3
 )

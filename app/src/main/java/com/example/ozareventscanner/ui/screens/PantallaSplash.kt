@@ -3,9 +3,6 @@ package com.example.ozareventscanner.ui.screens
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,15 +18,9 @@ import androidx.compose.ui.unit.sp
 import com.example.ozareventscanner.ui.theme.*
 import kotlinx.coroutines.delay
 
-// Colores locales ajustados a la nueva paleta clara
-private val SplashFondo1    = ColorDark
-private val SplashFondo2    = GradientFondo[1]
-private val SplashAccent    = ColorPrimary
-private val SplashSecundario = ColorTextSecondary
-
 /**
- * Pantalla 1 — Splash.
- * Muestra animación de logo + nombre y navega automáticamente a la siguiente pantalla.
+ * Pantalla 1 — Splash de Ozar Events Scanner.
+ * Muestra animación de logo con los Genesis Design Tokens y navega automáticamente.
  */
 @Composable
 fun PantallaSplash(onSplashFinalizado: () -> Unit) {
@@ -48,12 +39,9 @@ fun PantallaSplash(onSplashFinalizado: () -> Unit) {
     val alphaTexto = remember { Animatable(0f) }
 
     LaunchedEffect(Unit) {
-        // Fade-in del ícono
         alpha.animateTo(1f, animationSpec = tween(800))
-        // Fade-in del texto con pequeño delay
         delay(200)
         alphaTexto.animateTo(1f, animationSpec = tween(600))
-        // Espera antes de navegar
         delay(1400)
         onSplashFinalizado()
     }
@@ -76,11 +64,15 @@ fun PantallaSplash(onSplashFinalizado: () -> Unit) {
         label = "dot3"
     )
 
-    // ── Layout ────────────────────────────────────────────────────────────────
+    // ── Layout Genesis ────────────────────────────────────────────────────────
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(SplashFondo1, SplashFondo2))),
+            .background(
+                Brush.verticalGradient(
+                    listOf(ColorForeground, GreenDark3, GreenDark2)
+                )
+            ),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -88,41 +80,53 @@ fun PantallaSplash(onSplashFinalizado: () -> Unit) {
             verticalArrangement = Arrangement.Center
         ) {
 
-            // Ícono principal
-            Icon(
-                imageVector        = Icons.Default.QrCodeScanner,
-                contentDescription = "Logo Ozar",
-                tint               = SplashAccent,
-                modifier           = Modifier
-                    .size(100.dp)
+            // Logotipo oficial de Zendov Scanner
+            Box(
+                modifier = Modifier
                     .scale(escala)
-                    .alpha(alpha.value)
-            )
+                    .alpha(alpha.value),
+                contentAlignment = Alignment.Center
+            ) {
+                com.example.ozareventscanner.ui.components.ZendovBrandMark(size = 72.dp)
+            }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
-            // Nombre de la app
+            // Nombre oficial
             Text(
-                text       = "Ozar Event Scanner",
-                fontSize   = 26.sp,
-                fontWeight = FontWeight.Bold,
-                color      = ColorTextPrimary,
+                text       = "zendov",
+                fontSize   = 36.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color      = Color.White,
                 textAlign  = TextAlign.Center,
+                letterSpacing = (-0.06).sp,
                 modifier   = Modifier.alpha(alphaTexto.value)
             )
 
             Text(
-                text     = "Gestión de eventos y beneficios",
-                fontSize = 14.sp,
-                color    = SplashSecundario,
+                text     = "SCANNER",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color    = GreenLight1,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                letterSpacing = 4.sp,
                 modifier = Modifier
-                    .padding(top = 6.dp)
+                    .padding(top = 4.dp)
+                    .alpha(alphaTexto.value)
+            )
+
+            Text(
+                text     = "Gestión de eventos en vivo",
+                fontSize = 14.sp,
+                color    = GreenLight2.copy(alpha = 0.8f),
+                modifier = Modifier
+                    .padding(top = 10.dp)
                     .alpha(alphaTexto.value)
             )
 
             Spacer(modifier = Modifier.height(48.dp))
 
-            // Dots de carga
+            // Dots de carga en verde vibrante Genesis
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.alpha(alphaTexto.value)
@@ -132,7 +136,7 @@ fun PantallaSplash(onSplashFinalizado: () -> Unit) {
                         modifier = Modifier
                             .size(8.dp)
                             .alpha(alphaValor)
-                            .background(SplashAccent, shape = androidx.compose.foundation.shape.CircleShape)
+                            .background(GreenBase, shape = ShapeRadiusPill)
                     )
                 }
             }

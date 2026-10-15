@@ -45,7 +45,9 @@ data class ParticipanteSyncDto(
     val idParticipante: String,
     val nombre: String,
     val beneficioEntregado: Boolean,
-    val timestampEscaneo: Long?         // null si no ha sido escaneado aún
+    val timestampEscaneo: Long?,        // null si no ha sido escaneado aún
+    val documento: String? = null,
+    val correo: String? = null
 )
 
 /** Respuesta completa del GET /sync/download. */

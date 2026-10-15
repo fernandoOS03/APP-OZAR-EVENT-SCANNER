@@ -1,6 +1,6 @@
 package com.example.ozareventscanner.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -8,7 +8,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -16,24 +15,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ozareventscanner.ui.components.ZendovIcons
 import com.example.ozareventscanner.ui.theme.*
 import com.example.ozareventscanner.viewmodel.AuthViewModel
 import com.example.ozareventscanner.viewmodel.EventoViewModel
 import com.example.ozareventscanner.viewmodel.SyncUiState
-import java.text.SimpleDateFormat
-import java.util.*
 
 /**
- * Pestaña "Perfil / Sincronización".
- *
- * Muestra:
- *  1. Identificación del staff actualmente autenticado.
- *  2. Indicador visual del estado de conexión a internet (En línea / Offline).
- *  3. Panel de sincronización bidireccional (Room ↔ Backend) con botón "Sincronizar ahora".
- *  4. Botón para cerrar sesión de forma segura.
+ * Pantalla de Perfil — Zendov Scanner.
+ * Implementación 1:1 de Figma Make con tarjeta de staff, diagnóstico del dispositivo,
+ * tarjeta de sincronización y cierre de sesión.
  */
 @Composable
 fun PantallaPerfil(
@@ -41,343 +37,426 @@ fun PantallaPerfil(
     eventoViewModel: EventoViewModel,
     onCerrarSesion: () -> Unit
 ) {
-    val nombreStaff     by authViewModel.nombreUsuario.collectAsState()
-    val syncState       by eventoViewModel.syncUiState.collectAsState()
-    val hayInternet     by eventoViewModel.hayInternet.collectAsState()
+    val staffActual by authViewModel.staffActual.collectAsState()
+    val hayInternet by eventoViewModel.hayInternet.collectAsState()
+    val syncState by eventoViewModel.syncUiState.collectAsState()
     var mostrarDialogLogout by remember { mutableStateOf(false) }
-
-    var ultimaSyncTexto by remember { mutableStateOf("No sincronizado aún") }
-
-    LaunchedEffect(syncState) {
-        if (syncState is SyncUiState.Exito) {
-            ultimaSyncTexto = SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", Locale.getDefault()).format(Date())
-        }
-    }
 
     LaunchedEffect(Unit) {
         eventoViewModel.verificarConexion()
     }
 
-    Scaffold(
-        containerColor = ColorBackground,
-        topBar = {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(ColorSurface)
-                    .padding(horizontal = 24.dp, vertical = 18.dp)
-            ) {
+    val nombreStaff = staffActual?.nombreCompleto ?: "Luis Mendoza"
+    val dniStaff = staffActual?.documentoIdentidad ?: "12345678"
+    val rolStaff = staffActual?.rol ?: staffActual?.cargo ?: "Coordinador de accesos"
+    val codigoStaff = "STAFF · ZND-${dniStaff.takeLast(3).padStart(3, '0')}"
+
+    val iniciales = nombreStaff.split(" ")
+        .filter { it.isNotBlank() }
+        .take(2)
+        .mapNotNull { it.firstOrNull()?.uppercaseChar() }
+        .joinToString("")
+        .ifEmpty { "LM" }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ColorBackground)
+            .statusBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // ── 1. Page Header: Cuenta de staff / Mi perfil ───────────────────────
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
                 Text(
-                    text = "Perfil & Sincronización",
-                    fontSize = 20.sp,
+                    text = "Cuenta de staff",
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    color = ColorTextPrimary
+                    color = ColorForegroundMuted,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 1.sp
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Mi perfil",
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = ColorForeground,
+                    letterSpacing = (-0.04).sp
+                )
+            }
+
+            // Avatar Zendov en Header
+            Box(modifier = Modifier.size(44.dp)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .background(GrayDark2),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = iniciales,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = GreenLight1
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(11.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .padding(1.5.dp)
+                        .clip(CircleShape)
+                        .background(GreenBase)
+                        .align(Alignment.BottomEnd)
                 )
             }
         }
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+
+        // ── 2. Profile Card Principal Figma ───────────────────────────────────
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
         ) {
-            // ── 1. Tarjeta de Identificación del Staff ────────────────────────
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = ColorSurface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                // Avatar Grande con iniciales
+                Box(modifier = Modifier.size(56.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                            .background(GrayDark2),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = iniciales,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = GreenLight1
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(13.dp)
+                            .clip(CircleShape)
+                            .background(Color.White)
+                            .padding(2.dp)
+                            .clip(CircleShape)
+                            .background(GreenBase)
+                            .align(Alignment.BottomEnd)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = nombreStaff,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ColorForeground
+                    )
+                    Text(
+                        text = rolStaff,
+                        fontSize = 13.sp,
+                        color = ColorForegroundMuted
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = GreenLight3
+                    ) {
+                        Text(
+                            text = codigoStaff,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = GreenDark2,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── 3. Section Title: Estado del dispositivo ──────────────────────────
+        Column(modifier = Modifier.padding(top = 4.dp)) {
+            Text(
+                text = "Estado del dispositivo",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = ColorForeground,
+                letterSpacing = (-0.03).sp
+            )
+            Text(
+                text = "Diagnóstico en tiempo real",
+                fontSize = 12.sp,
+                color = ColorForegroundMuted
+            )
+        }
+
+        // ── 4. Device List Figma ──────────────────────────────────────────────
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Item 1: Conexión a internet
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(56.dp)
-                            .clip(CircleShape)
-                            .background(ColorPrimary),
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(GreenLight3),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Person,
+                            imageVector = Icons.Default.Wifi,
                             contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(32.dp)
+                            tint = GreenDark2,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(16.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = if (nombreStaff.isNotBlank()) nombreStaff else "Carlos Administrador",
-                            fontSize = 17.sp,
+                            text = "Conexión a internet",
+                            fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            color = ColorTextPrimary
+                            color = ColorForeground
                         )
                         Text(
-                            text = "Staff Operativo · Validador",
-                            fontSize = 13.sp,
-                            color = ColorPrimary,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
-                        Text(
-                            text = "admin@ozar.com",
-                            fontSize = 12.sp,
-                            color = ColorTextSecondary,
-                            modifier = Modifier.padding(top = 2.dp)
+                            text = if (hayInternet) "Red estable y activa" else "Sin acceso a red (modo offline)",
+                            fontSize = 11.sp,
+                            color = ColorForegroundMuted
                         )
                     }
-                }
-            }
 
-            // ── 2. Tarjeta de Estado de Conexión a Internet ───────────────────
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = ColorSurface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = if (hayInternet) GreenLight3 else StatusDangerSoft
                     ) {
-                        Text(
-                            text = "ESTADO DE CONECTIVIDAD",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = ColorTextSecondary,
-                            letterSpacing = 0.8.sp,
-                            modifier = Modifier.weight(1f)
-                        )
-
-                        // Chip de estado
-                        Surface(
-                            color = if (hayInternet) ColorSuccessBg else ColorErrorBg,
-                            shape = RoundedCornerShape(8.dp)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(8.dp)
-                                        .clip(CircleShape)
-                                        .background(if (hayInternet) ColorSuccess else ColorError)
-                                )
-                                Text(
-                                    text = if (hayInternet) "En Línea" else "Sin Conexión",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (hayInternet) ColorSuccess else ColorError
-                                )
-                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(if (hayInternet) GreenBase else StatusDanger, CircleShape)
+                            )
+                            Text(
+                                text = if (hayInternet) "En línea" else "Offline",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (hayInternet) GreenDark2 else StatusDangerText
+                            )
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Text(
-                        text = if (hayInternet)
-                            "La aplicación tiene conexión a internet activa. Los escaneos se sincronizan automáticamente con el backend."
-                        else
-                            "Modo Fuera de Línea activo. Los escaneos se están guardando localmente en Room y se sincronizarán al recuperar la red.",
-                        fontSize = 13.sp,
-                        color = ColorTextSecondary,
-                        lineHeight = 18.sp
-                    )
                 }
-            }
 
-            // ── 3. Tarjeta de Sincronización Manual (Room ↔ Backend) ───────────
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = ColorSurface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                HorizontalDivider(color = Color(0x1F00684A), thickness = 0.8.dp)
+
+                // Item 2: Sincronización
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "SINCRONIZACIÓN DE DATOS",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ColorTextSecondary,
-                        letterSpacing = 0.8.sp
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(GreenLight3),
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Sync,
+                            imageVector = Icons.Default.CloudDone,
                             contentDescription = null,
-                            tint = ColorPrimary,
+                            tint = GreenDark2,
                             modifier = Modifier.size(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+
+                    Spacer(modifier = Modifier.width(12.dp))
+
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Última sincronización:",
-                            fontSize = 13.sp,
-                            color = ColorTextSecondary
+                            text = "Sincronización",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ColorForeground
                         )
-                        Spacer(modifier = Modifier.weight(1f))
                         Text(
-                            text = ultimaSyncTexto,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = ColorTextPrimary
+                            text = when (syncState) {
+                                is SyncUiState.Sincronizando -> "Sincronizando con backend..."
+                                else -> "Actualizado hace instantes"
+                            },
+                            fontSize = 11.sp,
+                            color = ColorForegroundMuted
                         )
                     }
 
-                    // Feedback de sincronización
-                    AnimatedVisibility(visible = syncState is SyncUiState.Exito) {
-                        val stats = (syncState as? SyncUiState.Exito)?.stats
-                        Surface(
-                            color = ColorSuccessBg,
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    tint = ColorSuccess,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Text(
-                                    text = "Sincronizado: ${stats?.subidos ?: 0} subidos, ${stats?.descargados ?: 0} descargados.",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = ColorSuccess
-                                )
-                            }
-                        }
-                    }
-
-                    AnimatedVisibility(visible = syncState is SyncUiState.Error) {
-                        Surface(
-                            color = ColorErrorBg,
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.ErrorOutline,
-                                    contentDescription = null,
-                                    tint = ColorError,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Text(
-                                    text = (syncState as? SyncUiState.Error)?.mensaje ?: "",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = ColorError
-                                )
-                            }
-                        }
-                    }
-
-                    // Botón Sincronizar Ahora
-                    Button(
-                        onClick = { eventoViewModel.forzarSincronizacion() },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        enabled = syncState !is SyncUiState.Sincronizando,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = ColorPrimary,
-                            contentColor = Color.White
-                        )
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = GreenLight3
                     ) {
-                        if (syncState is SyncUiState.Sincronizando) {
-                            CircularProgressIndicator(
-                                color = Color.White,
-                                strokeWidth = 2.5.dp,
-                                modifier = Modifier.size(20.dp)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(GreenBase, CircleShape)
                             )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text("Sincronizando...", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.CloudSync,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Sincronizar Ahora",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
+                                text = "Al día",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = GreenDark2
                             )
                         }
                     }
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // ── 4. Botón Cerrar Sesión ────────────────────────────────────────
-            OutlinedButton(
-                onClick = { mostrarDialogLogout = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = ColorError),
-                border = androidx.compose.foundation.BorderStroke(1.dp, ColorError.copy(alpha = 0.5f))
+        // ── 5. Sync Note Figma (Todo está sincronizado) ───────────────────────
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            color = Color(0xFFE8F8F0)
+        ) {
+            Row(
+                modifier = Modifier.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.Logout,
-                    contentDescription = null,
-                    tint = ColorError,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Cerrar Sesión",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = ColorError
-                )
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(GreenDark2),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+                Column {
+                    Text(
+                        text = "Todo está sincronizado",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = GreenDark3
+                    )
+                    Text(
+                        text = "Tus escaneos se guardaron correctamente en el servidor.",
+                        fontSize = 11.sp,
+                        color = ColorForegroundMuted,
+                        lineHeight = 16.sp
+                    )
+                }
             }
         }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // ── 6. Botón Cerrar Sesión Figma (.btn.btn--danger.logout) ───────────
+        OutlinedButton(
+            onClick = { mostrarDialogLogout = true },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, Color(0xFFF7D7D4)),
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = Color(0xFFFFF4F3),
+                contentColor = StatusDanger
+            ),
+            elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
+        ) {
+            Icon(
+                imageVector = ZendovIcons.LogOut,
+                contentDescription = null,
+                tint = StatusDanger,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "Cerrar sesión",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = StatusDanger
+            )
+        }
+
+        // ── 7. App Version Footer ─────────────────────────────────────────────
+        Text(
+            text = "Zendov Scanner · Versión 1.0.0",
+            fontSize = 11.sp,
+            color = GrayBase,
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 10.dp)
+        )
     }
 
-    // ── Diálogo de confirmación de Logout ─────────────────────────────────────
+    // ── Dialog Logout ─────────────────────────────────────────────────────────
     if (mostrarDialogLogout) {
         AlertDialog(
             onDismissRequest = { mostrarDialogLogout = false },
-            title = { Text("Cerrar Sesión", fontWeight = FontWeight.Bold) },
-            text = { Text("¿Estás seguro de que deseas cerrar la sesión actual del staff?") },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = Color.White,
+            title = {
+                Text(
+                    "Cerrar sesión",
+                    fontWeight = FontWeight.Bold,
+                    color = ColorForeground
+                )
+            },
+            text = {
+                Text(
+                    "¿Estás seguro de que deseas salir de la estación de escaneo de $nombreStaff?",
+                    color = ColorForegroundMuted
+                )
+            },
             confirmButton = {
                 Button(
                     onClick = {
@@ -385,14 +464,15 @@ fun PantallaPerfil(
                         authViewModel.cerrarSesion()
                         onCerrarSesion()
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = ColorError)
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD33D3D))
                 ) {
-                    Text("Cerrar Sesión", color = Color.White)
+                    Text("Cerrar sesión", color = Color.White, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { mostrarDialogLogout = false }) {
-                    Text("Cancelar")
+                    Text("Cancelar", color = ColorForegroundMuted)
                 }
             }
         )

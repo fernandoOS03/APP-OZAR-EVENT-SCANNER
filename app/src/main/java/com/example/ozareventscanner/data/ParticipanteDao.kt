@@ -22,17 +22,31 @@ interface ParticipanteDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertarParticipantes(participantes: List<ParticipanteEntity>)
 
-    @Query("SELECT * FROM participantes WHERE idParticipante = :id")
+    @Query("""
+        SELECT * FROM participantes 
+        WHERE idParticipante = :id 
+           OR (documento IS NOT NULL AND documento = :id) 
+           OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
+        LIMIT 1
+    """)
     suspend fun buscarParticipante(id: String): ParticipanteEntity?
 
     @Query("SELECT * FROM participantes ORDER BY nombre ASC")
     suspend fun obtenerTodos(): List<ParticipanteEntity>
 
-    /** Busca participantes por nombre o ID/DNI (case-insensitive). */
+    @Query("SELECT COUNT(*) FROM participantes")
+    suspend fun contarTotalParticipantes(): Int
+
+    @Query("SELECT COUNT(*) FROM participantes")
+    fun observarTotalParticipantes(): kotlinx.coroutines.flow.Flow<Int>
+
+    /** Busca participantes por nombre, ID, DNI o Correo (case-insensitive). */
     @Query("""
         SELECT * FROM participantes 
         WHERE LOWER(nombre) LIKE '%' || LOWER(:query) || '%' 
            OR LOWER(idParticipante) LIKE '%' || LOWER(:query) || '%' 
+           OR (documento IS NOT NULL AND LOWER(documento) LIKE '%' || LOWER(:query) || '%')
+           OR (correo IS NOT NULL AND LOWER(correo) LIKE '%' || LOWER(:query) || '%')
         ORDER BY nombre ASC
     """)
     suspend fun buscarPorNombreOId(query: String): List<ParticipanteEntity>
@@ -54,9 +68,26 @@ interface ParticipanteDao {
             timestampEscaneo      = :timestamp,
             pendienteSubida       = 1,
             sincronizadoConBackend = 0
-        WHERE idParticipante = :id
+        WHERE idParticipante = :id 
+           OR (documento IS NOT NULL AND documento = :id) 
+           OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
     """)
     suspend fun marcarEscaneoLocal(id: String, timestamp: Long)
+
+    /**
+     * Marca el escaneo como confirmado y sincronizado inmediatamente con el backend.
+     */
+    @Query("""
+        UPDATE participantes
+        SET beneficioEntregado    = 1,
+            timestampEscaneo      = :timestamp,
+            pendienteSubida       = 0,
+            sincronizadoConBackend = 1
+        WHERE idParticipante = :id 
+           OR (documento IS NOT NULL AND documento = :id) 
+           OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
+    """)
+    suspend fun marcarEscaneoConfirmado(id: String, timestamp: Long)
 
     // ── Sincronización ────────────────────────────────────────────────────────
 
@@ -90,7 +121,9 @@ interface ParticipanteDao {
             timestampEscaneo      = NULL,
             pendienteSubida       = 0,
             sincronizadoConBackend = 1
-        WHERE idParticipante = :id
+        WHERE idParticipante = :id 
+           OR (documento IS NOT NULL AND documento = :id) 
+           OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
     """)
     suspend fun revertirEscaneoRechazado(id: String)
 

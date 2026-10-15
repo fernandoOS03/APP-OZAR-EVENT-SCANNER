@@ -25,8 +25,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * ModalBottomSheet de Material 3 para mostrar el resultado inmediato
- * tras un escaneo QR y permitir la validación de identidad del participante.
+ * ModalBottomSheet de Material 3 con diseño editorial de Zendov Scanner.
+ * Muestra el resultado instantáneo del escaneo con confirmación visual de acreditación.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,63 +36,64 @@ fun ModalBottomSheetResultadoScan(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    // Configuración visual según el estado del escaneo
     val (icono, colorPrimario, colorFondoIcono, titulo, subtitulo) = when (data.estado) {
         is ScanUiState.Valido -> ConfigModal(
-            icono = Icons.Default.CheckCircle,
-            color = ColorSuccess,
-            colorFondo = ColorSuccessBg,
-            titulo = "¡Beneficio Entregado!",
-            subtitulo = "El participante es válido y su beneficio fue registrado."
+            icono      = Icons.Default.CheckCircle,
+            color      = StatusSuccess,
+            colorFondo = GreenLight3,
+            titulo     = "¡Beneficio Entregado!",
+            subtitulo  = if (data.mensajeServidor.isNotBlank()) data.mensajeServidor else "Acreditación confirmada y entrega registrada."
         )
         is ScanUiState.YaEscaneado -> ConfigModal(
-            icono = Icons.Default.Warning,
-            color = ColorWarning,
-            colorFondo = ColorWarningBg,
-            titulo = "Atención: Ya Escaneado",
-            subtitulo = "Este participante ya recibió su beneficio anteriormente."
+            icono      = Icons.Default.Warning,
+            color      = StatusWarning,
+            colorFondo = StatusWarningSoft,
+            titulo     = "Atención: Ya Fue Reclamado",
+            subtitulo  = if (data.mensajeServidor.isNotBlank()) data.mensajeServidor else "Este beneficio ya fue entregado previamente a este asistente."
         )
         is ScanUiState.FormatoInvalido -> ConfigModal(
-            icono = Icons.Default.QrCodeScanner,
-            color = ColorWarning,
-            colorFondo = ColorWarningBg,
-            titulo = "Código QR No Válido",
-            subtitulo = "El formato escaneado no corresponde a un participante del evento."
+            icono      = Icons.Default.QrCodeScanner,
+            color      = StatusWarning,
+            colorFondo = StatusWarningSoft,
+            titulo     = "Código QR No Válido",
+            subtitulo  = "El formato escaneado no corresponde al estándar del evento."
         )
         is ScanUiState.NoEncontrado -> ConfigModal(
-            icono = Icons.Default.PersonOff,
-            color = ColorError,
-            colorFondo = ColorErrorBg,
-            titulo = "Participante No Encontrado",
-            subtitulo = "El ID no está registrado en la base de datos local."
+            icono      = Icons.Default.PersonOff,
+            color      = StatusDanger,
+            colorFondo = StatusDangerSoft,
+            titulo     = "Asistente No Registrado",
+            subtitulo  = "El código no coincide con ningún participante autorizado."
         )
         is ScanUiState.ErrorScan -> ConfigModal(
-            icono = Icons.Default.Error,
-            color = ColorError,
-            colorFondo = ColorErrorBg,
-            titulo = "Error de Validación",
-            subtitulo = data.estado.mensaje
+            icono      = Icons.Default.Error,
+            color      = StatusDanger,
+            colorFondo = StatusDangerSoft,
+            titulo     = "Error en Validación",
+            subtitulo  = data.estado.mensaje
         )
         else -> ConfigModal(
-            icono = Icons.Default.Info,
-            color = ColorPrimary,
-            colorFondo = ColorInfoBg,
-            titulo = "Escaneo Realizado",
-            subtitulo = "Procesando información..."
+            icono      = Icons.Default.Info,
+            color      = GreenDark2,
+            colorFondo = GreenLight3,
+            titulo     = "Escaneo Registrado",
+            subtitulo  = "Procesando información..."
         )
     }
 
-    val fechaHoraFormateada = SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", Locale.getDefault())
+    val esQrInvalido = data.estado is ScanUiState.FormatoInvalido || data.estado is ScanUiState.NoEncontrado
+
+    val fechaMostrar = data.fechaEscaneo ?: SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", Locale.getDefault())
         .format(Date(data.timestamp))
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = ColorSurface,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        sheetState       = sheetState,
+        containerColor   = Color.White,
+        shape            = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         dragHandle = {
             BottomSheetDefaults.DragHandle(
-                color = ColorTextDisabled.copy(alpha = 0.5f)
+                color = GrayLight1
             )
         }
     ) {
@@ -106,169 +107,189 @@ fun ModalBottomSheetResultadoScan(
             // ── Ícono de Estado ──────────────────────────────────────────────
             Box(
                 modifier = Modifier
-                    .size(72.dp)
+                    .size(68.dp)
                     .clip(CircleShape)
                     .background(colorFondoIcono),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = icono,
+                    imageVector        = icono,
                     contentDescription = null,
-                    tint = colorPrimario,
-                    modifier = Modifier.size(42.dp)
+                    tint               = colorPrimario,
+                    modifier           = Modifier.size(38.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             // ── Título y Subtítulo ───────────────────────────────────────────
             Text(
-                text = titulo,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = ColorTextPrimary,
-                textAlign = TextAlign.Center
+                text       = titulo,
+                fontSize   = 22.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color      = ColorForeground,
+                textAlign  = TextAlign.Center,
+                letterSpacing = (-0.03).sp
             )
 
             Text(
-                text = subtitulo,
-                fontSize = 13.sp,
-                color = ColorTextSecondary,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(top = 4.dp, bottom = 20.dp)
+                text       = subtitulo,
+                fontSize   = 13.sp,
+                color      = ColorForegroundMuted,
+                textAlign  = TextAlign.Center,
+                lineHeight = 18.sp,
+                modifier   = Modifier.padding(top = 4.dp, bottom = 18.dp)
             )
 
-            // ── Tarjeta de Ficha de Identidad del Participante ───────────────
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = ColorBackground),
-                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+            // ── Tarjeta con Detalles del Asistente y Beneficio ───────────────
+            if (!esQrInvalido) {
+                Card(
+                    modifier  = Modifier.fillMaxWidth(),
+                    shape     = RoundedCornerShape(16.dp),
+                    colors    = CardDefaults.cardColors(containerColor = GrayLight3),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
-                    Text(
-                        text = "DATOS DEL PARTICIPANTE",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ColorTextSecondary,
-                        letterSpacing = 0.8.sp
-                    )
-
-                    // Nombre Completo
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Person,
-                            contentDescription = null,
-                            tint = ColorPrimary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (data.nombre.isNotBlank()) data.nombre else "No identificado",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = ColorTextPrimary
+                            text          = "DETALLE DE LA OPERACIÓN",
+                            fontSize      = 10.sp,
+                            fontWeight    = FontWeight.Bold,
+                            color         = ColorForegroundMuted,
+                            fontFamily    = FontFamily.Monospace,
+                            letterSpacing = 1.sp
                         )
-                    }
 
-                    // ID / Código
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Badge,
-                            contentDescription = null,
-                            tint = ColorTextSecondary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "ID / DNI: ",
-                            fontSize = 13.sp,
-                            color = ColorTextSecondary
-                        )
-                        Text(
-                            text = data.idParticipante,
-                            fontSize = 13.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.SemiBold,
-                            color = ColorTextPrimary
-                        )
-                    }
+                        // Nombre Completo
+                        Row(
+                            modifier          = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector        = Icons.Default.Person,
+                                contentDescription = null,
+                                tint               = GreenDark2,
+                                modifier           = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text       = if (data.nombre.isNotBlank()) data.nombre else "Asistente",
+                                fontSize   = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color      = ColorForeground
+                            )
+                        }
 
-                    // Fecha y Hora del Escaneo
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AccessTime,
-                            contentDescription = null,
-                            tint = ColorTextSecondary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = fechaHoraFormateada,
-                            fontSize = 13.sp,
-                            color = ColorTextSecondary
-                        )
-                    }
+                        // Beneficio Entregado
+                        if (data.beneficioNombre.isNotBlank()) {
+                            Row(
+                                modifier          = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector        = Icons.Default.CardGiftcard,
+                                    contentDescription = null,
+                                    tint               = GreenDark1,
+                                    modifier           = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text     = "Beneficio: ",
+                                    fontSize = 13.sp,
+                                    color    = ColorForegroundMuted
+                                )
+                                Text(
+                                    text       = data.beneficioNombre,
+                                    fontSize   = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color      = ColorForeground
+                                )
+                            }
+                        }
 
-                    // Estado de persistencia local
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.CloudQueue,
-                            contentDescription = null,
-                            tint = ColorSuccess,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Persistido en base local (Room)",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = ColorSuccess
-                        )
+
+                        // Fecha y Hora
+                        Row(
+                            modifier          = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector        = Icons.Default.AccessTime,
+                                contentDescription = null,
+                                tint               = GrayBase,
+                                modifier           = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text     = if (data.yaEntregadoPreviamente) "Fecha original: " else "Fecha registro: ",
+                                fontSize = 13.sp,
+                                color    = ColorForegroundMuted
+                            )
+                            Text(
+                                text       = fechaMostrar,
+                                fontSize   = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color      = ColorForeground
+                            )
+                        }
+
+                        // Staff Operador
+                        data.staffNombre?.let { staff ->
+                            Row(
+                                modifier          = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector        = Icons.Default.VerifiedUser,
+                                    contentDescription = null,
+                                    tint               = GreenDark2,
+                                    modifier           = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text     = if (data.yaEntregadoPreviamente) "Entregado por: " else "Staff operador: ",
+                                    fontSize = 13.sp,
+                                    color    = ColorForegroundMuted
+                                )
+                                Text(
+                                    text       = staff,
+                                    fontSize   = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color      = ColorForeground
+                                )
+                            }
+                        }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
-            // ── Botón de Acción Principal ────────────────────────────────────
+            // ── Botón Siguiente Escaneo ──────────────────────────────────────
             Button(
-                onClick = onDismiss,
+                onClick  = onDismiss,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = colorPrimario,
-                    contentColor = Color.White
+                    .height(54.dp),
+                shape    = RoundedCornerShape(16.dp),
+                colors   = ButtonDefaults.buttonColors(
+                    containerColor = GreenDark2,
+                    contentColor   = Color.White
                 )
             ) {
                 Icon(
-                    imageVector = Icons.Default.QrCodeScanner,
+                    imageVector        = Icons.Default.QrCodeScanner,
                     contentDescription = null,
-                    modifier = Modifier.size(20.dp)
+                    modifier           = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Siguiente Escaneo",
-                    fontSize = 15.sp,
+                    text       = "Siguiente Escaneo",
+                    fontSize   = 15.sp,
                     fontWeight = FontWeight.Bold
                 )
             }

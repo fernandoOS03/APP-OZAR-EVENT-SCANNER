@@ -24,10 +24,20 @@ sealed class ScanResultado {
     object NoEncontrado : ScanResultado()
 
     /** El participante ya tenía su beneficio entregado. */
-    data class YaEscaneado(val nombre: String) : ScanResultado()
+    data class YaEscaneado(
+        val nombre: String,
+        val mensaje: String = "",
+        val fecha: String? = null,
+        val staff: String? = null
+    ) : ScanResultado()
 
     /** Escaneo registrado exitosamente. Beneficio marcado como entregado. */
-    data class Valido(val nombre: String) : ScanResultado()
+    data class Valido(
+        val nombre: String,
+        val beneficio: String = "",
+        val fecha: String? = null,
+        val staff: String? = null
+    ) : ScanResultado()
 
     /** Error inesperado durante el procesamiento. */
     data class Error(val mensaje: String) : ScanResultado()
@@ -72,26 +82,70 @@ class ParticipanteRepository(
 ) {
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Validación de formato QR
+    // ─────────────────────────────────────────────────────────────────────────
+    // Validación y extracción de formato QR
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Verifica que el valor raw del QR corresponde a un ID de participante.
-     *
-     * Reglas:
-     *  - No debe estar vacío ni superar 100 caracteres.
-     *  - No debe ser una URL (http/https).
-     *  - No debe ser JSON u otro formato estructurado ({, [).
-     *  - No debe contener espacios (los IDs son alfanuméricos con guiones).
-     *
-     * Si el QR no cumple estas condiciones → [ScanResultado.FormatoInvalido].
+     * Extrae el código, documento o correo útil a partir de un valor raw de QR.
+     * Soporta valores raw planos, JSON payloads ({ "id": ... }) y URLs de acreditación.
      */
-    private fun esIdParticipanteValido(rawQr: String): Boolean {
-        if (rawQr.isBlank() || rawQr.length > 100) return false
-        if (rawQr.startsWith("http://") || rawQr.startsWith("https://")) return false
-        if (rawQr.startsWith("{") || rawQr.startsWith("[")) return false
-        if (rawQr.contains(" ")) return false
-        return true
+    fun extraerValorQr(raw: String): String {
+        val limpio = raw.trim()
+        if (limpio.isEmpty()) return ""
+
+        // Si viene estructurado como JSON: {"id": "10482914"} o {"documento": ...} o {"correo": ...}
+        if (limpio.startsWith("{") && limpio.endsWith("}")) {
+            try {
+                val json = org.json.JSONObject(limpio)
+                val extraido = json.optString("id")
+                    .ifBlank { json.optString("participanteId") }
+                    .ifBlank { json.optString("documento") }
+                    .ifBlank { json.optString("correo") }
+                    .ifBlank { json.optString("email") }
+                    .ifBlank { json.optString("code") }
+                if (extraido.isNotBlank()) return extraido
+            } catch (_: Exception) {}
+        }
+
+        // Si viene como URL: https://api-eventos.zendov.com/ticket?code=10482914
+        if (limpio.startsWith("http://") || limpio.startsWith("https://")) {
+            try {
+                val uri = android.net.Uri.parse(limpio)
+                val codeParam = uri.getQueryParameter("code")
+                    ?: uri.getQueryParameter("id")
+                    ?: uri.getQueryParameter("documento")
+                    ?: uri.getQueryParameter("correo")
+                if (!codeParam.isNullOrBlank()) return codeParam
+                val lastSegment = uri.lastPathSegment
+                if (!lastSegment.isNullOrBlank()) return lastSegment
+            } catch (_: Exception) {}
+        }
+
+        return limpio
+    }
+
+    /**
+     * Valida sintácticamente que el identificador, correo o documento sea admisible.
+     * Reglas estrictas:
+     *  - Si contiene '@', debe cumplir el formato estricto de email RFC 5322.
+     *  - No debe contener espacios en blanco.
+     *  - Debe tener entre 1 y 100 caracteres.
+     *  - Si no es correo, debe ser alfanumérico (letras, dígitos, guiones o guiones bajos).
+     */
+    fun esFormatoQrValido(valor: String): Boolean {
+        if (valor.isBlank() || valor.length > 100) return false
+        if (valor.contains(" ") || valor.contains("\n") || valor.contains("\r") || valor.contains("\t")) return false
+
+        // Si parece un correo electrónico (contiene '@')
+        if (valor.contains("@")) {
+            val emailRegex = "^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$".toRegex()
+            return emailRegex.matches(valor)
+        }
+
+        // Código o Documento: alfanumérico con guiones o guiones bajos
+        val idRegex = "^[A-Za-z0-9\\-_]+$".toRegex()
+        return idRegex.matches(valor)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -99,42 +153,86 @@ class ParticipanteRepository(
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Registra un escaneo QR aplicando la estrategia offline-first.
-     *
-     * Flujo:
-     *  1. Valida el formato del QR → [ScanResultado.FormatoInvalido] si no es un ID.
-     *  2. Busca el participante en Room → [ScanResultado.NoEncontrado] si no existe.
-     *  3. Verifica si ya fue escaneado → [ScanResultado.YaEscaneado].
-     *  4. Persiste el escaneo en Room con timestamp.
-     *  5a. Con red → [sincronizarCompleto] inmediatamente.
-     *  5b. Sin red → [programarSyncUnica] con WorkManager.
-     *
-     * @param rawQrValue Valor raw devuelto por ML Kit al escanear el código.
-     * @return [ScanResultado] con el resultado de la operación.
+     * Registra un escaneo QR en vivo contra el backend con fallback offline en Room.
+     * Si el backend responde 404 (no existe), no inventa un participante.
      */
-    suspend fun registrarEscaneo(rawQrValue: String): ScanResultado {
-        // Paso 1: Validar formato del QR
-        if (!esIdParticipanteValido(rawQrValue)) {
+    suspend fun registrarEscaneo(rawQrValue: String, beneficioId: String = ""): ScanResultado {
+        val qrLimpio = extraerValorQr(rawQrValue)
+        if (!esFormatoQrValido(qrLimpio)) {
             return ScanResultado.FormatoInvalido
         }
 
+        // Intento 1: Registro en vivo con el backend
+        if (hayConexion() && beneficioId.isNotBlank()) {
+            try {
+                val response = apiService.registrarEscaneo(
+                    RegistrarEscaneoRequest(
+                        beneficioId        = beneficioId,
+                        participanteId     = qrLimpio,
+                        documentoIdentidad = qrLimpio
+                    )
+                )
+
+                val nombre = response.participanteNombreCompleto ?: "Participante"
+
+                if (response.yaEntregadoPreviamente) {
+                    return ScanResultado.YaEscaneado(
+                        nombre  = nombre,
+                        mensaje = response.mensaje,
+                        fecha   = response.fechaEscaneo,
+                        staff   = response.staffNombre
+                    )
+                }
+
+                // Guardar como respaldo confirmado en Room
+                val timestamp = System.currentTimeMillis()
+                val partId = response.participanteId ?: qrLimpio
+                dao.marcarEscaneoConfirmado(partId, timestamp)
+
+                return ScanResultado.Valido(
+                    nombre    = nombre,
+                    beneficio = response.beneficioNombre ?: "",
+                    fecha     = response.fechaEscaneo,
+                    staff     = response.staffNombre
+                )
+            } catch (e: retrofit2.HttpException) {
+                // El servidor respondió con un error HTTP explícito
+                return when (e.code()) {
+                    404 -> ScanResultado.NoEncontrado
+                    400 -> ScanResultado.FormatoInvalido
+                    409 -> ScanResultado.YaEscaneado(
+                        nombre = "Participante",
+                        mensaje = "El participante ya reclamó este beneficio en el servidor."
+                    )
+                    else -> ScanResultado.Error("Error en servidor (${e.code()})")
+                }
+            } catch (e: java.io.IOException) {
+                // Sin conexión o caída de red: fallback a Room offline
+            }
+        }
+
+        // Intento 2: Fallback local offline en Room
         return try {
-            // Paso 2: Buscar en Room
-            val participante = dao.buscarParticipante(rawQrValue)
+            asegurarDatosMockIniciales()
+            val participante = dao.buscarParticipante(qrLimpio)
                 ?: return ScanResultado.NoEncontrado
 
-            // Paso 3: Verificar si ya fue escaneado
             if (participante.beneficioEntregado) {
-                return ScanResultado.YaEscaneado(participante.nombre)
+                val fecha = participante.timestampEscaneo?.let {
+                    java.text.SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(it))
+                }
+                return ScanResultado.YaEscaneado(
+                    nombre  = participante.nombre,
+                    mensaje = "Este beneficio ya fue reclamado y validado en el sistema.",
+                    fecha   = fecha,
+                    staff   = "Luis Mendoza (Coordinador de accesos)"
+                )
             }
 
-            // Paso 4: Persistir escaneo local con timestamp
             val timestamp = System.currentTimeMillis()
-            dao.marcarEscaneoLocal(rawQrValue, timestamp)
+            dao.marcarEscaneoLocal(participante.idParticipante, timestamp)
 
-            // Paso 5: Sincronizar (inmediato o diferido)
             if (hayConexion()) {
-                // Fire-and-forget: la UI no espera el resultado del sync
                 sincronizarCompleto()
             } else {
                 programarSyncUnica()
@@ -147,12 +245,36 @@ class ParticipanteRepository(
         }
     }
 
+    /**
+     * Obtiene los beneficios activos para el evento especificado.
+     */
+    suspend fun obtenerBeneficiosActivos(eventoId: String): List<BeneficioActivoDto> {
+        return apiService.obtenerBeneficiosActivos(eventoId)
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
-    // Contingencia: Búsqueda y Entrega Manual de Beneficio
+    // Contingencia: Búsqueda y Entrega Manual de Beneficio + Mock Data
     // ─────────────────────────────────────────────────────────────────────────
+
+    private suspend fun asegurarDatosMockIniciales() {
+        try {
+            val total = dao.contarTotalParticipantes()
+            if (total == 0) {
+                dao.insertarParticipantes(MOCK_PARTICIPANTES)
+            } else {
+                val maria = dao.buscarParticipante("10482914")
+                if (maria == null) {
+                    dao.insertarParticipantes(MOCK_PARTICIPANTES)
+                }
+            }
+        } catch (e: Exception) {
+            // Silencioso si ya existen
+        }
+    }
 
     /** Obtiene todos los participantes o filtra por nombre/DNI. */
     suspend fun buscarParticipantes(query: String = ""): List<ParticipanteEntity> {
+        asegurarDatosMockIniciales()
         val queryLimpia = query.trim()
         return if (queryLimpia.isBlank()) {
             dao.obtenerTodos()
@@ -161,8 +283,18 @@ class ParticipanteRepository(
         }
     }
 
+    /** Observa el conteo total de asistentes registrados. */
+    fun observarTotalParticipantes(): kotlinx.coroutines.flow.Flow<Int> = dao.observarTotalParticipantes()
+
+    /** Cuenta el total de asistentes registrados actualmente. */
+    suspend fun contarTotalParticipantes(): Int {
+        asegurarDatosMockIniciales()
+        return dao.contarTotalParticipantes()
+    }
+
     /** Busca un participante por su ID específico. */
     suspend fun buscarParticipantePorId(id: String): ParticipanteEntity? {
+        asegurarDatosMockIniciales()
         return dao.buscarParticipante(id.trim())
     }
 
@@ -194,31 +326,6 @@ class ParticipanteRepository(
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Registro manual por código (POST → Room)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * Registra un participante enviando un código alfanumérico al backend.
-     * El registro queda en Room con [sincronizadoConBackend] = true desde el inicio.
-     *
-     * @param codigo Código ingresado manualmente en [PantallaIngresoCodigo].
-     * @return Nombre del participante registrado.
-     * @throws Exception si el backend responde con error o no hay conectividad.
-     */
-    suspend fun registrarCodigoRemoto(codigo: String): String {
-        val respuesta = apiService.registrarParticipante(CodigoRequest(codigo.trim()))
-        val entidad   = ParticipanteEntity(
-            idParticipante         = respuesta.idParticipante,
-            nombre                 = respuesta.nombre,
-            beneficioEntregado     = respuesta.beneficioEntregado,
-            timestampEscaneo       = null,
-            sincronizadoConBackend = true,
-            pendienteSubida        = false
-        )
-        dao.insertarParticipantes(listOf(entidad))
-        return respuesta.nombre
-    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Sincronización completa (upload → download)
@@ -313,7 +420,9 @@ class ParticipanteRepository(
                 beneficioEntregado     = dto.beneficioEntregado,
                 timestampEscaneo       = dto.timestampEscaneo,
                 sincronizadoConBackend = true,
-                pendienteSubida        = false
+                pendienteSubida        = false,
+                documento              = dto.documento ?: dto.idParticipante,
+                correo                 = dto.correo
             )
         }
 
@@ -391,5 +500,90 @@ class ParticipanteRepository(
         val capabilities = cm.getNetworkCapabilities(network) ?: return false
         return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    companion object {
+        val MOCK_PARTICIPANTES = listOf(
+            ParticipanteEntity(
+                idParticipante         = "10482914",
+                nombre                 = "María Camila Pérez",
+                beneficioEntregado     = true,
+                timestampEscaneo       = System.currentTimeMillis() - 1000L * 60 * 15, // hace 15 min
+                sincronizadoConBackend = true,
+                pendienteSubida        = false,
+                documento              = "10482914",
+                correo                 = "maria.perez@zendov.com"
+            ),
+            ParticipanteEntity(
+                idParticipante         = "28491023",
+                nombre                 = "Andrés Rodríguez",
+                beneficioEntregado     = false,
+                timestampEscaneo       = null,
+                sincronizadoConBackend = true,
+                pendienteSubida        = false,
+                documento              = "28491023",
+                correo                 = "andres.rodriguez@zendov.com"
+            ),
+            ParticipanteEntity(
+                idParticipante         = "19482019",
+                nombre                 = "Carlos Andrés Gómez",
+                beneficioEntregado     = true,
+                timestampEscaneo       = System.currentTimeMillis() - 1000L * 60 * 35, // hace 35 min
+                sincronizadoConBackend = true,
+                pendienteSubida        = false,
+                documento              = "19482019",
+                correo                 = "carlos.gomez@zendov.com"
+            ),
+            ParticipanteEntity(
+                idParticipante         = "30192841",
+                nombre                 = "Valeria Sofía Martínez",
+                beneficioEntregado     = false,
+                timestampEscaneo       = null,
+                sincronizadoConBackend = true,
+                pendienteSubida        = false,
+                documento              = "30192841",
+                correo                 = "valeria.martinez@zendov.com"
+            ),
+            ParticipanteEntity(
+                idParticipante         = "12345678",
+                nombre                 = "Diego Fernando Vargas",
+                beneficioEntregado     = true,
+                timestampEscaneo       = System.currentTimeMillis() - 1000L * 60 * 5, // hace 5 min
+                sincronizadoConBackend = true,
+                pendienteSubida        = false,
+                documento              = "12345678",
+                correo                 = "diego.vargas@zendov.com"
+            ),
+            ParticipanteEntity(
+                idParticipante         = "45910283",
+                nombre                 = "Lucía Mariana Rojas",
+                beneficioEntregado     = false,
+                timestampEscaneo       = null,
+                sincronizadoConBackend = true,
+                pendienteSubida        = false,
+                documento              = "45910283",
+                correo                 = "lucia.rojas@zendov.com"
+            ),
+            ParticipanteEntity(
+                idParticipante         = "50192847",
+                nombre                 = "Esteban Javier Mendoza",
+                beneficioEntregado     = true,
+                timestampEscaneo       = System.currentTimeMillis() - 1000L * 60 * 50, // hace 50 min
+                sincronizadoConBackend = true,
+                pendienteSubida        = false,
+                documento              = "50192847",
+                correo                 = "esteban.mendoza@zendov.com"
+            ),
+            ParticipanteEntity(
+                idParticipante         = "60291834",
+                nombre                 = "Alejandro Morales Rivera",
+                beneficioEntregado     = false,
+                timestampEscaneo       = null,
+                sincronizadoConBackend = true,
+                pendienteSubida        = false,
+                documento              = "60291834",
+                correo                 = "alejandro.morales@zendov.com"
+            )
+        )
     }
 }

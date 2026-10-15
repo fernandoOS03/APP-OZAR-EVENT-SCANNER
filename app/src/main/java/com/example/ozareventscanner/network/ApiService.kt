@@ -3,46 +3,46 @@ package com.example.ozareventscanner.network
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
+import retrofit2.http.Path
 
 /**
- * Interfaz Retrofit que define todos los endpoints del backend.
+ * Interfaz Retrofit del backend Ozar Events Scanner.
  *
- * Endpoints implementados en el backend:
- *   POST /registrar-participante  → Registra un participante por código manual.
+ * Endpoints Oficiales (INFORME_MODULO_SCANNER.md):
+ *   1. POST /api/scanner/auth                                      → Login Staff (DNI + PIN)
+ *   2. GET  /api/scanner/eventos/{eventoId}/beneficios/activos      → Carga Beneficios Activos
+ *   3. POST /api/scanner/escaneos                                  → Registrar Escaneo / Entrega de Beneficio (QR)
  *
- * Endpoints pendientes de implementación en el backend (mock activo):
- *   POST /sync/upload             → Sube escaneos pendientes en lote con timestamps.
- *   GET  /sync/download           → Descarga el estado canónico de todos los participantes.
- *
- * ⚠️ Los endpoints de sync están mockeados en [RetrofitClient.mockSyncInterceptor].
- *    Cuando el backend los implemente, simplemente eliminar el interceptor.
+ * Endpoints de Sincronización Offline (WorkManager):
+ *   4. POST /sync/upload                                           → Subida diferida en lote
+ *   5. GET  /sync/download                                         → Descarga estado consolidado
  */
 interface ApiService {
 
-    // ── Registro manual de participante ───────────────────────────────────────
+    // ── 1. Autenticación de Staff ─────────────────────────────────────────────
 
-    @POST("registrar-participante")
-    suspend fun registrarParticipante(@Body request: CodigoRequest): ParticipanteResponse
+    @POST("api/scanner/auth")
+    suspend fun loginStaff(@Body request: StaffLoginRequest): StaffLoginResponse
 
-    // ── Sincronización bidireccional (MOCK activo) ────────────────────────────
+    // ── 2. Beneficios Activos del Evento ──────────────────────────────────────
 
-    /**
-     * Sube en lote los escaneos pendientes.
-     * El backend resuelve conflictos usando [EscaneoRequest.timestampEscaneo]:
-     * el escaneo con menor timestamp (más antiguo) es el válido.
-     *
-     * TODO: Implementar en el backend antes de producción.
-     */
+    @GET("api/scanner/eventos/{eventoId}/beneficios/activos")
+    suspend fun obtenerBeneficiosActivos(
+        @Path("eventoId") eventoId: String
+    ): List<BeneficioActivoDto>
+
+    // ── 3. Registrar Escaneo / Entrega de Beneficio (QR en Vivo) ──────────────
+
+    @POST("api/scanner/escaneos")
+    suspend fun registrarEscaneo(
+        @Body request: RegistrarEscaneoRequest
+    ): RegistrarEscaneoResponse
+
+    // ── Sincronización Offline (Room ↔ Backend) ──────────────────────────────
+
     @POST("sync/upload")
     suspend fun subirEscaneos(@Body request: SyncUploadRequest): SyncUploadResponse
 
-    /**
-     * Descarga el estado canónico de todos los participantes del evento.
-     * Se llama inmediatamente después de [subirEscaneos] para mantener
-     * la consistencia Room ↔ Backend.
-     *
-     * TODO: Implementar en el backend antes de producción.
-     */
     @GET("sync/download")
     suspend fun descargarEstado(): SyncDownloadResponse
 }

@@ -1,0 +1,48 @@
+====================================================================
+           ZENDOV EVENTS SCANNER — CREDENCIALES DE ACCESO
+====================================================================
+
+Dominio de API Backend:
+  https://api-eventos.zendov.com/
+
+Para ingresar a la estación de escaneo, el sistema utiliza comunicación
+con el dominio https://api-eventos.zendov.com/ y admite estrictamente
+el usuario staff oficial configurado como único modelo hardcodeado:
+
+--------------------------------------------------------------------
+  DATOS DE INGRESO DEL OPERADOR (STAFF OFICIAL / MODELO HARDCODEADO):
+--------------------------------------------------------------------
+  * Documento de Identidad (DNI) : 12345678
+  * PIN de Seguridad (6 dígitos) : 654321
+  * Validación Estricta          : Único usuario modelo permitido. Si se
+                                  ingresan otras credenciales y el backend
+                                  real no responde o está offline, el
+                                  acceso es RECHAZADO con código 401:
+                                  "Credenciales no válidas o no autorizadas".
+
+--------------------------------------------------------------------
+  DETALLES DEL PERFIL ASIGNADO (ZENDOV):
+--------------------------------------------------------------------
+  * Operador       : Luis Mendoza
+  * Cargo / Rol    : Coordinador de accesos
+  * Evento Activo  : Zendov Tech Summit 2025
+  * Evento ID      : EVT-025
+  * Slug Evento    : zendov-summit-2025
+  * Tenant ID      : tenant_zendov_2025
+  * Token JWT      : Inyectado automáticamente vía Authorization Bearer
+
+--------------------------------------------------------------------
+  BENEFICIOS CONFIGURADOS EN EL EVENTO (FIGMA MAKE):
+--------------------------------------------------------------------
+  01. Kit de bienvenida   (Bolso + credencial)
+  02. Almuerzo ejecutivo  (Salón principal · 13:00)
+  03. Acceso conferencia  (Auditorio A)
+  04. Merch oficial       (Acceso exclusivo)
+
+--------------------------------------------------------------------
+  PRUEBAS DE ESCANEO Y ASISTENTES FIGMA:
+--------------------------------------------------------------------
+  * María Camila Pérez (V-10482914) -> Beneficio entregado / Escaneo
+  * Andrés Rodríguez   (V-28491023) -> Pendiente de entrega
+  * Detección de duplicado con trazabilidad exacta (Luis Mendoza).
+====================================================================

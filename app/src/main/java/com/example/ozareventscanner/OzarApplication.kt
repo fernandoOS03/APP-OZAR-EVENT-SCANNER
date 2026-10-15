@@ -8,35 +8,26 @@ import androidx.work.WorkerFactory
 import androidx.work.WorkerParameters
 import com.example.ozareventscanner.data.AppDatabase
 import com.example.ozareventscanner.data.ParticipanteRepository
+import com.example.ozareventscanner.data.SessionManager
 import com.example.ozareventscanner.network.RetrofitClient
 import com.example.ozareventscanner.sync.SyncWorker
+import kotlinx.coroutines.launch
 
 /**
- * Application class de Ozar Event Scanner.
- *
- * Responsabilidades:
- *  1. Mantiene singletons de [AppDatabase] y [ParticipanteRepository] (inicialización lazy).
- *  2. Implementa [Configuration.Provider] para inyectar [SyncWorkerFactory] a WorkManager
- *     sin necesidad de Hilt/Dagger.
- *  3. Activa la sincronización periódica de fondo al iniciar la app.
- *
- * ## Cuando migres a Hilt
- * Reemplazar los `by lazy` por módulos `@Provides` y eliminar [SyncWorkerFactory],
- * usando `HiltWorkerFactory` en su lugar.
+ * Application class de Ozar Events Scanner.
  */
 class OzarApplication : Application(), Configuration.Provider {
 
     // ── Singletons de datos ───────────────────────────────────────────────────
 
-    /** Base de datos Room — inicialización lazy, hilo-segura. */
+    val sessionManager: SessionManager by lazy {
+        SessionManager.getInstance(this)
+    }
+
     val database: AppDatabase by lazy {
         AppDatabase.getDatabase(this)
     }
 
-    /**
-     * Repositorio central — único punto de acceso a datos en toda la app.
-     * Comparte la misma instancia entre [EventoViewModel] y [SyncWorker].
-     */
     val repository: ParticipanteRepository by lazy {
         ParticipanteRepository(
             dao        = database.participante(),
@@ -47,11 +38,10 @@ class OzarApplication : Application(), Configuration.Provider {
 
     // ── WorkManager con factory custom ────────────────────────────────────────
 
-    /**
-     * WorkManager usará esta configuración para instanciar workers.
-     * Al implementar [Configuration.Provider], WorkManager detecta automáticamente
-     * la configuración custom sin necesitar eliminar el inicializador del Manifest.
-     */
+    private val applicationScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
             .setWorkerFactory(SyncWorkerFactory(repository))
@@ -61,21 +51,71 @@ class OzarApplication : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
-        // Activar sync periódica en background al arrancar (cada 15 min, solo con red)
+        // Vincular SessionManager a RetrofitClient para inyección del JWT
+        RetrofitClient.sessionManager = sessionManager
+
+        // Programar sync periódica con WorkManager (15 min) para respaldo en background
         repository.programarSyncPeriodico()
+
+        // 1. Monitoreo reactivo de red: sincronizar automáticamente cada vez que se recupere conexión
+        iniciarMonitoreoDeRed()
+
+        // 2. Sincronización periódica automática mientras exista conexión
+        iniciarSyncPeriodicaActiva()
+    }
+
+    private fun iniciarMonitoreoDeRed() {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            ?: return
+
+        var conexionPrevia = repository.hayConexion()
+
+        val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                // Se detectó conexión; si venía de estar desconectado o al reconectar, sincronizar
+                applicationScope.launch {
+                    try {
+                        kotlinx.coroutines.delay(1000) // Breve estabilización de red
+                        if (repository.hayConexion()) {
+                            repository.sincronizarCompleto()
+                        }
+                    } catch (e: Exception) {
+                        // Respaldo con WorkManager si falla llamada directa
+                        repository.programarSyncUnica()
+                    }
+                }
+                conexionPrevia = true
+            }
+
+            override fun onLost(network: android.net.Network) {
+                conexionPrevia = false
+            }
+        }
+
+        try {
+            connectivityManager.registerDefaultNetworkCallback(networkCallback)
+        } catch (e: Exception) {
+            // Fallback: programar sync única condicionada por WorkManager
+            repository.programarSyncUnica()
+        }
+    }
+
+    private fun iniciarSyncPeriodicaActiva() {
+        applicationScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(60_000L) // Cada 60 segundos actualiza automáticamente si hay conexión
+                try {
+                    if (repository.hayConexion()) {
+                        repository.sincronizarCompleto()
+                    }
+                } catch (e: Exception) {
+                    // Silencioso en segundo plano
+                }
+            }
+        }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Factory de workers — inyección sin Hilt
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Factory custom que provee [ParticipanteRepository] al [SyncWorker].
- *
- * Patrón: WorkManager llama a [createWorker] para instanciar cada worker.
- * Si el worker no es conocido → devolver null (WorkManager usa su factory por defecto).
- */
 class SyncWorkerFactory(
     private val repository: ParticipanteRepository
 ) : WorkerFactory() {
@@ -88,8 +128,6 @@ class SyncWorkerFactory(
         return when (workerClassName) {
             SyncWorker::class.java.name ->
                 SyncWorker(appContext, workerParameters, repository)
-
-            // Devolver null para que WorkManager delegue a su factory por defecto
             else -> null
         }
     }

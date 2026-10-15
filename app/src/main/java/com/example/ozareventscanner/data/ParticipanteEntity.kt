@@ -27,5 +27,9 @@ data class ParticipanteEntity(
     val sincronizadoConBackend: Boolean = false,
 
     /** true cuando el escaneo está pendiente de subir al backend. */
-    val pendienteSubida: Boolean = false
+    val pendienteSubida: Boolean = false,
+
+    // ── Identificación complementaria para búsqueda y QR ─────────────────────
+    val documento: String? = null,
+    val correo: String? = null
 )

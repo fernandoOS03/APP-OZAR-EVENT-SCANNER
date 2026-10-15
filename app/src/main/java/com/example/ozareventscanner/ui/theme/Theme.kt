@@ -12,33 +12,37 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
 private val DarkColorScheme = darkColorScheme(
-    primary = ColorPrimary,
-    secondary = ColorAccent,
-    background = ColorDark,
-    surface = ColorSurface,
-    onPrimary = ColorSurface,
-    onBackground = ColorTextPrimary,
-    onSurface = ColorTextPrimary
+    primary          = ColorPrimaryVibrant,
+    onPrimary        = ColorForeground,
+    secondary        = ColorAccent,
+    onSecondary      = ColorAccentForeground,
+    background       = ColorDark,
+    onBackground     = ColorBackground,
+    surface          = GrayDark3,
+    onSurface        = ColorBackground,
+    outline          = GrayDark1,
+    surfaceVariant   = GrayDark4
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = ColorPrimary,
-    secondary = ColorAccent,
-    background = ColorDark, // ColorDark is Color(0xFFF9FAFB)
-    surface = ColorSurface, // Color(0xFFFFFFFF)
-    onPrimary = ColorSurface,
-    onBackground = ColorTextPrimary,
-    onSurface = ColorTextPrimary
+    primary          = ColorPrimary,
+    onPrimary        = ColorPrimaryForeground,
+    secondary        = ColorSecondary,
+    onSecondary      = ColorSecondaryForeground,
+    background       = ColorBackground,
+    onBackground     = ColorTextPrimary,
+    surface          = ColorSurface,
+    onSurface        = ColorTextPrimary,
+    outline          = ColorBorder,
+    surfaceVariant   = ColorSurfaceHigh
 )
 
 @Composable
 fun OzarEventScannerTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    // Disable dynamicColor to keep brand guidelines (Red/White theme)
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    // We prioritize our custom Claro/Ozar light theme for this brand adaptation
     val colorScheme = LightColorScheme
 
     val view = LocalView.current
@@ -46,14 +50,14 @@ fun OzarEventScannerTheme(
         SideEffect {
             val window = (view.context as Activity).window
             window.statusBarColor = colorScheme.background.toArgb()
-            // In light theme, we want dark icons in the status bar (isAppearanceLightStatusBars = true)
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = true
         }
     }
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography,
-        content = content
+        shapes      = AppShapes,
+        typography  = Typography,
+        content     = content
     )
 }
