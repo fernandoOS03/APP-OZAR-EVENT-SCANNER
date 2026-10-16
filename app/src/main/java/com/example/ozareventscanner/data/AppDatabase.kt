@@ -14,10 +14,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  *  v1 → Esquema inicial: idParticipante, nombre, beneficioEntregado.
  *  v2 → Agrega campos de sincronización: timestampEscaneo, sincronizadoConBackend, pendienteSubida.
  *  v3 → Agrega columnas documento y correo para identificación flexible y escaneo sin inventar.
+ *  v4 → Agrega índices en documento y correo (<10ms) y columnas de trazabilidad offline (scannedBy*, beneficioId).
  */
 @Database(
     entities     = [ParticipanteEntity::class],
-    version      = 3,
+    version      = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -60,6 +61,21 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migración v3 → v4.
+         * Agrega índices en documento y correo para búsquedas O(1)/log y columnas de auditoría offline.
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_participantes_documento ON participantes(documento)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_participantes_correo ON participantes(correo)")
+                db.execSQL("ALTER TABLE participantes ADD COLUMN scannedByStaffId TEXT")
+                db.execSQL("ALTER TABLE participantes ADD COLUMN scannedByStaffNombre TEXT")
+                db.execSQL("ALTER TABLE participantes ADD COLUMN scannedByDeviceId TEXT")
+                db.execSQL("ALTER TABLE participantes ADD COLUMN beneficioId TEXT")
+            }
+        }
+
         // ── Singleton ─────────────────────────────────────────────────────────
 
         fun getDatabase(context: Context): AppDatabase {
@@ -69,7 +85,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "ozar_event_database"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

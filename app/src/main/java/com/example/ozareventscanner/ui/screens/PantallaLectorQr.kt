@@ -508,6 +508,16 @@ private fun CameraPreviewWithValidation(
     val executor = remember { Executors.newSingleThreadExecutor() }
     val scanner = remember { BarcodeScanning.getClient() }
 
+    // Control atómico de concurrencia y cooldown para la cámara
+    val isProcessingQr = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    var ultimoTimestampEscaneo by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(estaEscaneandoActivo) {
+        if (estaEscaneandoActivo) {
+            isProcessingQr.set(false)
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose { executor.shutdown() }
     }
@@ -530,7 +540,10 @@ private fun CameraPreviewWithValidation(
                     .build()
 
                 imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                    if (!estaEscaneandoActivo) {
+                    val now = System.currentTimeMillis()
+                    val cooldownActivo = (now - ultimoTimestampEscaneo) < 1500L
+
+                    if (!estaEscaneandoActivo || isProcessingQr.get() || cooldownActivo) {
                         imageProxy.close()
                         return@setAnalyzer
                     }
@@ -543,16 +556,18 @@ private fun CameraPreviewWithValidation(
                         )
                         scanner.process(image)
                             .addOnSuccessListener { barcodes ->
-                                barcodes
-                                    .firstOrNull { it.rawValue != null }
-                                    ?.rawValue
-                                    ?.let { onQrDetectado(it) }
+                                val barcode = barcodes.firstOrNull { it.rawValue != null }?.rawValue
+                                if (barcode != null && isProcessingQr.compareAndSet(false, true)) {
+                                    ultimoTimestampEscaneo = System.currentTimeMillis()
+                                    onQrDetectado(barcode)
+                                }
                             }
                             .addOnCompleteListener { imageProxy.close() }
                     } else {
                         imageProxy.close()
                     }
                 }
+
 
                 try {
                     cameraProvider.unbindAll()

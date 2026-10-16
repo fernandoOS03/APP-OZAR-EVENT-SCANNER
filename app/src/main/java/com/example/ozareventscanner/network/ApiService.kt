@@ -21,19 +21,19 @@ interface ApiService {
 
     // ── 1. Autenticación de Staff ─────────────────────────────────────────────
 
-    @POST("api/scanner/auth")
+    @POST("api/v1/scanner/auth")
     suspend fun loginStaff(@Body request: StaffLoginRequest): StaffLoginResponse
 
     // ── 2. Beneficios Activos del Evento ──────────────────────────────────────
 
-    @GET("api/scanner/eventos/{eventoId}/beneficios/activos")
+    @GET("api/v1/scanner/eventos/{eventoId}/beneficios/activos")
     suspend fun obtenerBeneficiosActivos(
         @Path("eventoId") eventoId: String
     ): List<BeneficioActivoDto>
 
     // ── 3. Registrar Escaneo / Entrega de Beneficio (QR en Vivo) ──────────────
 
-    @POST("api/scanner/escaneos")
+    @POST("api/v1/scanner/escaneos")
     suspend fun registrarEscaneo(
         @Body request: RegistrarEscaneoRequest
     ): RegistrarEscaneoResponse

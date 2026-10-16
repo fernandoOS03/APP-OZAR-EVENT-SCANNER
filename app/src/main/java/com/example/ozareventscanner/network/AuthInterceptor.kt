@@ -15,7 +15,7 @@ class AuthInterceptor(private val sessionManagerProvider: () -> SessionManager?)
 
         // Si la petición ya tiene Authorization o es el endpoint de login, no alteramos
         if (originalRequest.header("Authorization") != null ||
-            originalRequest.url.encodedPath.contains("api/scanner/auth")) {
+            originalRequest.url.encodedPath.contains("api/v1/scanner/auth")) {
             return chain.proceed(originalRequest)
         }
 

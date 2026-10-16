@@ -51,3 +51,5 @@ Thumbs.db
 
 #extrs 
 .playwright-mcp
+config.bat
+node_modules
