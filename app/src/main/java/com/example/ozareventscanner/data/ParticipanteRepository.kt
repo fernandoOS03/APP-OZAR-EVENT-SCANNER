@@ -153,8 +153,12 @@ class ParticipanteRepository(
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Registra un escaneo QR en vivo contra el backend con fallback offline en Room.
-     * Si el backend responde 404 (no existe), no inventa un participante.
+     * Registra un escaneo QR aplicando arquitectura Single Source of Truth (SSOT) Offline-First estricta:
+     *  1. Valida sintácticamente el código.
+     *  2. Valida contra Room de manera inmediata (< 10 ms).
+     *  3. Si es válido, persiste en Room con timestamp y datos de auditoría (pendiente de subida).
+     *  4. Encola sincronización en segundo plano con WorkManager (sin bloquear el hilo de la cámara).
+     *  5. Retorna inmediatamente el resultado para respuesta instantánea de la UI.
      */
     suspend fun registrarEscaneo(rawQrValue: String, beneficioId: String = ""): ScanResultado {
         val qrLimpio = extraerValorQr(rawQrValue)
@@ -162,56 +166,6 @@ class ParticipanteRepository(
             return ScanResultado.FormatoInvalido
         }
 
-        // Intento 1: Registro en vivo con el backend
-        if (hayConexion() && beneficioId.isNotBlank()) {
-            try {
-                val response = apiService.registrarEscaneo(
-                    RegistrarEscaneoRequest(
-                        beneficioId        = beneficioId,
-                        participanteId     = qrLimpio,
-                        documentoIdentidad = qrLimpio
-                    )
-                )
-
-                val nombre = response.participanteNombreCompleto ?: "Participante"
-
-                if (response.yaEntregadoPreviamente) {
-                    return ScanResultado.YaEscaneado(
-                        nombre  = nombre,
-                        mensaje = response.mensaje,
-                        fecha   = response.fechaEscaneo,
-                        staff   = response.staffNombre
-                    )
-                }
-
-                // Guardar como respaldo confirmado en Room
-                val timestamp = System.currentTimeMillis()
-                val partId = response.participanteId ?: qrLimpio
-                dao.marcarEscaneoConfirmado(partId, timestamp)
-
-                return ScanResultado.Valido(
-                    nombre    = nombre,
-                    beneficio = response.beneficioNombre ?: "",
-                    fecha     = response.fechaEscaneo,
-                    staff     = response.staffNombre
-                )
-            } catch (e: retrofit2.HttpException) {
-                // El servidor respondió con un error HTTP explícito
-                return when (e.code()) {
-                    404 -> ScanResultado.NoEncontrado
-                    400 -> ScanResultado.FormatoInvalido
-                    409 -> ScanResultado.YaEscaneado(
-                        nombre = "Participante",
-                        mensaje = "El participante ya reclamó este beneficio en el servidor."
-                    )
-                    else -> ScanResultado.Error("Error en servidor (${e.code()})")
-                }
-            } catch (e: java.io.IOException) {
-                // Sin conexión o caída de red: fallback a Room offline
-            }
-        }
-
-        // Intento 2: Fallback local offline en Room
         return try {
             asegurarDatosMockIniciales()
             val participante = dao.buscarParticipante(qrLimpio)
@@ -221,29 +175,49 @@ class ParticipanteRepository(
                 val fecha = participante.timestampEscaneo?.let {
                     java.text.SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(it))
                 }
+                val staffNombre = participante.scannedByStaffNombre ?: "Operador de acreditaciones"
                 return ScanResultado.YaEscaneado(
                     nombre  = participante.nombre,
                     mensaje = "Este beneficio ya fue reclamado y validado en el sistema.",
                     fecha   = fecha,
-                    staff   = "Luis Mendoza (Coordinador de accesos)"
+                    staff   = staffNombre
                 )
             }
 
             val timestamp = System.currentTimeMillis()
-            dao.marcarEscaneoLocal(participante.idParticipante, timestamp)
+            val session = SessionManager.getInstance(context).obtenerStaff()
+            val staffId = session?.staffId
+            val staffNombre = session?.nombreCompleto ?: "Staff Acreditación"
+            val deviceId = "device_${android.os.Build.MODEL.replace(" ", "_")}"
 
+            dao.marcarEscaneoLocalConAuditoria(
+                id          = participante.idParticipante,
+                timestamp   = timestamp,
+                staffId     = staffId,
+                staffNombre = staffNombre,
+                deviceId    = deviceId,
+                beneficioId = if (beneficioId.isNotBlank()) beneficioId else participante.beneficioId
+            )
+
+            // Disparar sincronización resiliente en segundo plano (no bloquea UI)
             if (hayConexion()) {
-                sincronizarCompleto()
+                programarSyncUnica()
             } else {
                 programarSyncUnica()
             }
 
-            ScanResultado.Valido(participante.nombre)
+            ScanResultado.Valido(
+                nombre    = participante.nombre,
+                beneficio = if (beneficioId.isNotBlank()) beneficioId else "Beneficio Acreditado",
+                fecha     = java.text.SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(timestamp)),
+                staff     = staffNombre
+            )
 
         } catch (e: Exception) {
             ScanResultado.Error("Error al procesar escaneo: ${e.localizedMessage}")
         }
     }
+
 
     /**
      * Obtiene los beneficios activos para el evento especificado.
@@ -366,16 +340,22 @@ class ParticipanteRepository(
         val pendientes = dao.obtenerPendientesSync()
         if (pendientes.isEmpty()) return Pair(0, 0)
 
+        val deviceId = "device_${android.os.Build.MODEL.replace(" ", "_")}"
         val request = SyncUploadRequest(
             escaneos = pendientes.map { p ->
                 EscaneoRequest(
                     idParticipante   = p.idParticipante,
-                    timestampEscaneo = p.timestampEscaneo ?: System.currentTimeMillis()
+                    timestampEscaneo = p.timestampEscaneo ?: System.currentTimeMillis(),
+                    beneficioId      = p.beneficioId,
+                    staffId          = p.scannedByStaffId,
+                    deviceId         = p.scannedByDeviceId ?: deviceId
                 )
-            }
+            },
+            deviceId = deviceId
         )
 
         val response = apiService.subirEscaneos(request)
+
 
         val idsConfirmados = if (response.resultados.isEmpty()) {
             // Si el backend (o mock) no devuelve detalle por item, confirmamos todo el lote enviado

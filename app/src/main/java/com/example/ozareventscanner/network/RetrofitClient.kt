@@ -70,7 +70,7 @@ object RetrofitClient {
         // Mock exacto según INFORME_MODULO_SCANNER.md y especificaciones Zendov
         when {
             // ── 1. POST /api/scanner/auth ─────────────────────────────────────
-            path.contains("api/scanner/auth") -> {
+            path.contains("scanner/auth") -> {
                 val buffer = okio.Buffer()
                 request.body?.writeTo(buffer)
                 val bodyStr = buffer.readUtf8()
@@ -182,7 +182,7 @@ object RetrofitClient {
             }
 
             // ── 3. POST /api/scanner/escaneos ─────────────────────────────────
-            path.contains("api/scanner/escaneos") -> {
+            path.contains("scanner/escaneos") -> {
                 val buffer = okio.Buffer()
                 request.body?.writeTo(buffer)
                 val bodyStr = buffer.readUtf8()

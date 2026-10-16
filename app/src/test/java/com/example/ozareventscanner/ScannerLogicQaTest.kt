@@ -79,25 +79,48 @@ class ScannerLogicQaTest {
             participantesDb[p.idParticipante] = p.copy(beneficioEntregado = entregado)
         }
 
-        override suspend fun marcarEscaneoLocal(id: String, timestamp: Long) {
+        override suspend fun marcarEscaneoLocalConAuditoria(
+            id: String,
+            timestamp: Long,
+            staffId: String?,
+            staffNombre: String?,
+            deviceId: String?,
+            beneficioId: String?
+        ) {
             val p = buscarParticipante(id) ?: return
             participantesDb[p.idParticipante] = p.copy(
                 beneficioEntregado = true,
                 timestampEscaneo = timestamp,
                 pendienteSubida = true,
-                sincronizadoConBackend = false
+                sincronizadoConBackend = false,
+                scannedByStaffId = staffId,
+                scannedByStaffNombre = staffNombre,
+                scannedByDeviceId = deviceId,
+                beneficioId = beneficioId
             )
         }
 
-        override suspend fun marcarEscaneoConfirmado(id: String, timestamp: Long) {
+        override suspend fun marcarEscaneoConfirmadoConAuditoria(
+            id: String,
+            timestamp: Long,
+            staffId: String?,
+            staffNombre: String?,
+            deviceId: String?,
+            beneficioId: String?
+        ) {
             val p = buscarParticipante(id) ?: return
             participantesDb[p.idParticipante] = p.copy(
                 beneficioEntregado = true,
                 timestampEscaneo = timestamp,
                 pendienteSubida = false,
-                sincronizadoConBackend = true
+                sincronizadoConBackend = true,
+                scannedByStaffId = staffId,
+                scannedByStaffNombre = staffNombre,
+                scannedByDeviceId = deviceId,
+                beneficioId = beneficioId
             )
         }
+
 
         override suspend fun obtenerPendientesSync(): List<ParticipanteEntity> =
             participantesDb.values.filter { it.pendienteSubida }
@@ -492,6 +515,28 @@ class ScannerLogicQaTest {
         assertEquals(1, pendientes.size)
         assertEquals("28491023", pendientes[0].idParticipante)
     }
+
+    @Test
+    fun testOffline_escaneoConAuditoriaCompleta_persisteStaffYDispositivo() = runBlocking {
+        val timestamp = System.currentTimeMillis()
+        fakeDao.marcarEscaneoLocalConAuditoria(
+            id = "28491023",
+            timestamp = timestamp,
+            staffId = "STF-025",
+            staffNombre = "Luis Mendoza",
+            deviceId = "device_Pixel_8",
+            beneficioId = "ben-001-kit"
+        )
+
+        val p = fakeDao.buscarParticipante("28491023")
+        assertNotNull(p)
+        assertTrue(p!!.beneficioEntregado)
+        assertEquals("STF-025", p.scannedByStaffId)
+        assertEquals("Luis Mendoza", p.scannedByStaffNombre)
+        assertEquals("device_Pixel_8", p.scannedByDeviceId)
+        assertEquals("ben-001-kit", p.beneficioId)
+    }
+
 
     @Test
     fun testOffline_syncUpload_confirmaYDespejaPendientes() = runBlocking {

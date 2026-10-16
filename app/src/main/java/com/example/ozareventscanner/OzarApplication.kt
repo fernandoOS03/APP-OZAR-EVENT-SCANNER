@@ -59,9 +59,6 @@ class OzarApplication : Application(), Configuration.Provider {
 
         // 1. Monitoreo reactivo de red: sincronizar automáticamente cada vez que se recupere conexión
         iniciarMonitoreoDeRed()
-
-        // 2. Sincronización periódica automática mientras exista conexión
-        iniciarSyncPeriodicaActiva()
     }
 
     private fun iniciarMonitoreoDeRed() {
@@ -72,7 +69,7 @@ class OzarApplication : Application(), Configuration.Provider {
 
         val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: android.net.Network) {
-                // Se detectó conexión; si venía de estar desconectado o al reconectar, sincronizar
+                // Se detectó conexión; si venía de estar desconectado o al reconectar, sincronizar pendientes
                 applicationScope.launch {
                     try {
                         kotlinx.coroutines.delay(1000) // Breve estabilización de red
@@ -99,22 +96,8 @@ class OzarApplication : Application(), Configuration.Provider {
             repository.programarSyncUnica()
         }
     }
-
-    private fun iniciarSyncPeriodicaActiva() {
-        applicationScope.launch {
-            while (true) {
-                kotlinx.coroutines.delay(60_000L) // Cada 60 segundos actualiza automáticamente si hay conexión
-                try {
-                    if (repository.hayConexion()) {
-                        repository.sincronizarCompleto()
-                    }
-                } catch (e: Exception) {
-                    // Silencioso en segundo plano
-                }
-            }
-        }
-    }
 }
+
 
 class SyncWorkerFactory(
     private val repository: ParticipanteRepository

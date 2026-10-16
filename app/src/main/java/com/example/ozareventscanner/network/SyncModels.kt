@@ -11,13 +11,18 @@ package com.example.ozareventscanner.network
  */
 data class EscaneoRequest(
     val idParticipante: String,
-    val timestampEscaneo: Long          // epoch ms — menor timestamp = ganador del conflicto
+    val timestampEscaneo: Long,         // epoch ms — menor timestamp = ganador del conflicto
+    val beneficioId: String? = null,
+    val staffId: String? = null,
+    val deviceId: String? = null
 )
 
-/** Cuerpo del POST /sync/upload. */
+/** Cuerpo del POST /api/v1/scanner/sync/upload. */
 data class SyncUploadRequest(
-    val escaneos: List<EscaneoRequest>
+    val escaneos: List<EscaneoRequest>,
+    val deviceId: String? = null
 )
+
 
 /**
  * Resultado por participante tras el procesamiento del backend.

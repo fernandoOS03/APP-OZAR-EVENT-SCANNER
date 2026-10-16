@@ -58,36 +58,70 @@ interface ParticipanteDao {
     suspend fun actualizarBeneficio(id: String, entregado: Boolean)
 
     /**
-     * Registra un escaneo QR local con timestamp.
-     * Establece [beneficioEntregado] = true, [pendienteSubida] = true y guarda el timestamp.
+     * Registra un escaneo QR local con timestamp y auditoría offline.
+     * Establece [beneficioEntregado] = true, [pendienteSubida] = true y guarda el timestamp y staff.
      * Este es el primer paso del flujo offline-first antes de sincronizar con el backend.
      */
     @Query("""
         UPDATE participantes
-        SET beneficioEntregado    = 1,
-            timestampEscaneo      = :timestamp,
-            pendienteSubida       = 1,
-            sincronizadoConBackend = 0
+        SET beneficioEntregado     = 1,
+            timestampEscaneo       = :timestamp,
+            pendienteSubida        = 1,
+            sincronizadoConBackend  = 0,
+            scannedByStaffId       = :staffId,
+            scannedByStaffNombre   = :staffNombre,
+            scannedByDeviceId      = :deviceId,
+            beneficioId            = :beneficioId
         WHERE idParticipante = :id 
            OR (documento IS NOT NULL AND documento = :id) 
            OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
     """)
-    suspend fun marcarEscaneoLocal(id: String, timestamp: Long)
+    suspend fun marcarEscaneoLocalConAuditoria(
+        id: String,
+        timestamp: Long,
+        staffId: String?,
+        staffNombre: String?,
+        deviceId: String?,
+        beneficioId: String?
+    )
 
     /**
-     * Marca el escaneo como confirmado y sincronizado inmediatamente con el backend.
+     * Sobrecarga simple para compatibilidad previa.
+     */
+    suspend fun marcarEscaneoLocal(id: String, timestamp: Long) {
+        marcarEscaneoLocalConAuditoria(id, timestamp, null, null, null, null)
+    }
+
+    /**
+     * Marca el escaneo como confirmado y sincronizado con el backend.
      */
     @Query("""
         UPDATE participantes
-        SET beneficioEntregado    = 1,
-            timestampEscaneo      = :timestamp,
-            pendienteSubida       = 0,
-            sincronizadoConBackend = 1
+        SET beneficioEntregado     = 1,
+            timestampEscaneo       = :timestamp,
+            pendienteSubida        = 0,
+            sincronizadoConBackend  = 1,
+            scannedByStaffId       = :staffId,
+            scannedByStaffNombre   = :staffNombre,
+            scannedByDeviceId      = :deviceId,
+            beneficioId            = :beneficioId
         WHERE idParticipante = :id 
            OR (documento IS NOT NULL AND documento = :id) 
            OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
     """)
-    suspend fun marcarEscaneoConfirmado(id: String, timestamp: Long)
+    suspend fun marcarEscaneoConfirmadoConAuditoria(
+        id: String,
+        timestamp: Long,
+        staffId: String?,
+        staffNombre: String?,
+        deviceId: String?,
+        beneficioId: String?
+    )
+
+    suspend fun marcarEscaneoConfirmado(id: String, timestamp: Long) {
+        marcarEscaneoConfirmadoConAuditoria(id, timestamp, null, null, null, null)
+    }
+
 
     // ── Sincronización ────────────────────────────────────────────────────────
 
