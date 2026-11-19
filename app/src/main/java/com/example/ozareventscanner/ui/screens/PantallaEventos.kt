@@ -21,7 +21,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ozareventscanner.network.BeneficioActivoDto
+import com.example.ozareventscanner.data.BeneficioEntity
 import com.example.ozareventscanner.network.StaffDataDto
 import com.example.ozareventscanner.ui.components.ZendovIcons
 import com.example.ozareventscanner.ui.theme.*
@@ -37,7 +37,7 @@ import java.util.*
 fun PantallaEventos(
     staffActual: StaffDataDto?,
     eventoViewModel: EventoViewModel,
-    onEscanearBeneficio: (BeneficioActivoDto) -> Unit
+    onEscanearBeneficio: (BeneficioEntity) -> Unit
 ) {
     val eventoData = staffActual?.evento
     val nombreEvento = eventoData?.nombre ?: "Zendov Tech Summit 2025"
@@ -45,8 +45,7 @@ fun PantallaEventos(
 
     val beneficios by eventoViewModel.beneficiosActivos.collectAsState()
     val totalAsistentes by eventoViewModel.totalAsistentes.collectAsState()
-    val participantes by eventoViewModel.listaParticipantes.collectAsState()
-    val totalEscaneados = participantes.count { it.beneficioEntregado }
+    val conteoPorBeneficio by eventoViewModel.conteoPorBeneficio.collectAsState()
 
     // Cargar beneficios si aún no están en memoria
     LaunchedEffect(eventoId) {
@@ -283,7 +282,7 @@ fun PantallaEventos(
         } else {
             itemsIndexed(beneficios, key = { _, b -> b.id }) { index, beneficio ->
                 val numStr = String.format(Locale.US, "%02d", index + 1)
-                val entregados = (totalEscaneados * (0.6f + (index * 0.1f)).coerceAtMost(1f)).toInt()
+                val entregados = conteoPorBeneficio[beneficio.id] ?: 0
                 val porcentaje = if (totalAsistentes > 0) ((entregados.toFloat() / totalAsistentes.toFloat()) * 100).toInt() else 0
 
                 Card(

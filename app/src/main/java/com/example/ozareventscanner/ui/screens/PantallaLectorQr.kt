@@ -13,7 +13,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -49,7 +49,9 @@ import com.example.ozareventscanner.ui.components.ZendovIcons
 import com.example.ozareventscanner.ui.theme.*
 import com.example.ozareventscanner.viewmodel.EventoViewModel
 import com.example.ozareventscanner.viewmodel.ScanUiState
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 
@@ -66,6 +68,7 @@ fun PantallaLectorQr(
     val context = LocalContext.current
     val scanState by viewModel.scanState.collectAsState()
     val scanModalData by viewModel.scanModalData.collectAsState()
+    val beneficioSeleccionado by viewModel.beneficioSeleccionado.collectAsState()
 
     var tienePermiso by remember {
         mutableStateOf(
@@ -270,31 +273,12 @@ fun PantallaLectorQr(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "Apunta la cámara hacia el código del participante",
+                    text = beneficioSeleccionado?.let { "Escaneando: ${it.nombre}" }
+                        ?: "Selecciona un beneficio para escanear",
                     color = Color.White.copy(alpha = 0.85f),
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center
                 )
-
-                // Botón interactivo para simular lectura (como en Figma Make)
-                Surface(
-                    onClick = {
-                        viewModel.validarYMarcarParticipante("PART-1001")
-                    },
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color.Black.copy(alpha = 0.45f),
-                    border = BorderStroke(1.dp, GreenDark1.copy(alpha = 0.6f))
-                ) {
-                    Text(
-                        text = "TOCA PARA SIMULAR LECTURA",
-                        color = GreenLight1,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        letterSpacing = 1.4.sp,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                    )
-                }
             }
         }
 
@@ -346,42 +330,28 @@ private fun ZendovFocusZone(
         else -> GreenLight1
     }
 
-    // Animación continua del láser de escaneo
-    val infiniteTransition = rememberInfiniteTransition(label = "laser_transition")
-    val laserProgress by infiniteTransition.animateFloat(
+    // Animación de centelleo solo para los puntitos atmosféricos (sin barra láser)
+    val infiniteTransition = rememberInfiniteTransition(label = "sparks_transition")
+    val twinkleProgressState = infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2200, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "laser_progress"
-    )
-
-    // Animación de centelleo para las 14 chispas atmosféricas (.spark twinkle)
-    val twinkleProgress by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = LinearEasing),
+            animation = tween(1800, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "twinkle_progress"
     )
 
     Box(
-        modifier = modifier,
-        contentAlignment = Alignment.Center
-    ) {
-        // 4 Esquinas con curvatura suave de 15px según Figma + 14 Chispas atmosféricas
-        Canvas(modifier = Modifier.fillMaxSize()) {
+        modifier = modifier.drawBehind {
             val cornerLen = 42.dp.toPx()
             val radius = 15.dp.toPx()
             val strokeWidth = 2.dp.toPx()
             val w = size.width
             val h = size.height
+            val twinkleProgress = twinkleProgressState.value
 
-            // Top-Left corner
+            // 4 Esquinas con curvatura suave
             val pathTL = Path().apply {
                 moveTo(0f, cornerLen)
                 lineTo(0f, radius)
@@ -390,7 +360,6 @@ private fun ZendovFocusZone(
             }
             drawPath(pathTL, color = colorAcento, style = Stroke(width = strokeWidth))
 
-            // Top-Right corner
             val pathTR = Path().apply {
                 moveTo(w - cornerLen, 0f)
                 lineTo(w - radius, 0f)
@@ -399,7 +368,6 @@ private fun ZendovFocusZone(
             }
             drawPath(pathTR, color = colorAcento, style = Stroke(width = strokeWidth))
 
-            // Bottom-Left corner
             val pathBL = Path().apply {
                 moveTo(0f, h - cornerLen)
                 lineTo(0f, h - radius)
@@ -408,7 +376,6 @@ private fun ZendovFocusZone(
             }
             drawPath(pathBL, color = colorAcento, style = Stroke(width = strokeWidth))
 
-            // Bottom-Right corner
             val pathBR = Path().apply {
                 moveTo(w - cornerLen, h)
                 lineTo(w - radius, h)
@@ -417,56 +384,27 @@ private fun ZendovFocusZone(
             }
             drawPath(pathBR, color = colorAcento, style = Stroke(width = strokeWidth))
 
-            // 14 Chispas atmosféricas / Partículas flotantes (1:1 Figma Make .spark)
+            // 14 puntitos luminosos flotantes (lectura diferida en fase de dibujo)
             sparksList.forEach { spark ->
                 val sparkPhase = (twinkleProgress + spark.delayFraction) % 1f
                 val alpha = (0.25f + 0.75f * kotlin.math.sin(sparkPhase * Math.PI.toFloat())).coerceIn(0.15f, 1f)
                 val cx = w * spark.xRatio
                 val cy = h * spark.yRatio
-                // Resplandor exterior
                 drawCircle(
                     color = GreenBase.copy(alpha = alpha * 0.4f),
                     radius = 4.5.dp.toPx(),
                     center = Offset(cx, cy)
                 )
-                // Punto de luz central
                 drawCircle(
                     color = GreenLight1.copy(alpha = alpha),
                     radius = 1.8.dp.toPx(),
                     center = Offset(cx, cy)
                 )
             }
-        }
-
-        // Línea Láser Animada con Gradiente Verde Neón (.scan-line)
-        if (scanState is ScanUiState.Idle) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(vertical = 16.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(0.85f)
-                        .height(2.dp)
-                        .align(Alignment.TopCenter)
-                        .offset(y = (220.dp * laserProgress))
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(
-                                    Color.Transparent,
-                                    colorAcento.copy(alpha = 0.5f),
-                                    colorAcento,
-                                    colorAcento.copy(alpha = 0.5f),
-                                    Color.Transparent
-                                )
-                            )
-                        )
-                )
-            }
-        }
-
-        // Copy central de estado (.scan-copy 1:1 Figma Make)
+        },
+        contentAlignment = Alignment.Center
+    ) {
+        // Copy central de estado
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(16.dp)
@@ -506,11 +444,20 @@ private fun CameraPreviewWithValidation(
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
-    val scanner = remember { BarcodeScanning.getClient() }
+    val scanner = remember {
+        val options = BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .build()
+        BarcodeScanning.getClient(options)
+    }
+
+    // Referencias actualizadas para evitar closures obsoletos dentro de AndroidView.factory
+    val activoState by rememberUpdatedState(estaEscaneandoActivo)
+    val onQrDetectadoState by rememberUpdatedState(onQrDetectado)
 
     // Control atómico de concurrencia y cooldown para la cámara
     val isProcessingQr = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-    var ultimoTimestampEscaneo by remember { mutableLongStateOf(0L) }
+    val ultimoTimestampEscaneo = remember { java.util.concurrent.atomic.AtomicLong(0L) }
 
     LaunchedEffect(estaEscaneandoActivo) {
         if (estaEscaneandoActivo) {
@@ -519,7 +466,10 @@ private fun CameraPreviewWithValidation(
     }
 
     DisposableEffect(Unit) {
-        onDispose { executor.shutdown() }
+        onDispose {
+            scanner.close()
+            executor.shutdown()
+        }
     }
 
     AndroidView(
@@ -541,9 +491,9 @@ private fun CameraPreviewWithValidation(
 
                 imageAnalysis.setAnalyzer(executor) { imageProxy ->
                     val now = System.currentTimeMillis()
-                    val cooldownActivo = (now - ultimoTimestampEscaneo) < 1500L
+                    val cooldownActivo = (now - ultimoTimestampEscaneo.get()) < 1500L
 
-                    if (!estaEscaneandoActivo || isProcessingQr.get() || cooldownActivo) {
+                    if (!activoState || isProcessingQr.get() || cooldownActivo) {
                         imageProxy.close()
                         return@setAnalyzer
                     }
@@ -558,8 +508,8 @@ private fun CameraPreviewWithValidation(
                             .addOnSuccessListener { barcodes ->
                                 val barcode = barcodes.firstOrNull { it.rawValue != null }?.rawValue
                                 if (barcode != null && isProcessingQr.compareAndSet(false, true)) {
-                                    ultimoTimestampEscaneo = System.currentTimeMillis()
-                                    onQrDetectado(barcode)
+                                    ultimoTimestampEscaneo.set(System.currentTimeMillis())
+                                    onQrDetectadoState(barcode)
                                 }
                             }
                             .addOnCompleteListener { imageProxy.close() }

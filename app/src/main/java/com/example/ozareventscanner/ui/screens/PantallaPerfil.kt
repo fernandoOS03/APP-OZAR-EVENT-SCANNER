@@ -40,7 +40,12 @@ fun PantallaPerfil(
     val staffActual by authViewModel.staffActual.collectAsState()
     val hayInternet by eventoViewModel.hayInternet.collectAsState()
     val syncState by eventoViewModel.syncUiState.collectAsState()
+    val pendientesSync by eventoViewModel.pendientesSyncCount.collectAsState()
+    val pendientesOtrosUsuarios by eventoViewModel.pendientesOtrosUsuariosCount.collectAsState()
+    val conflictosCount by eventoViewModel.conflictosCount.collectAsState()
+    val conflictosLista by eventoViewModel.conflictosLista.collectAsState()
     var mostrarDialogLogout by remember { mutableStateOf(false) }
+    var mostrarDialogConflictos by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         eventoViewModel.verificarConexion()
@@ -317,9 +322,13 @@ fun PantallaPerfil(
                             color = ColorForeground
                         )
                         Text(
-                            text = when (syncState) {
+                            text = when (val estadoSync = syncState) {
                                 is SyncUiState.Sincronizando -> "Sincronizando con backend..."
-                                else -> "Actualizado hace instantes"
+                                is SyncUiState.Error -> "Error: ${estadoSync.mensaje}"
+                                else -> when {
+                                    pendientesSync > 0 -> "$pendientesSync escaneos pendientes"
+                                    else -> "Todo sincronizado"
+                                }
                             },
                             fontSize = 11.sp,
                             color = ColorForegroundMuted
@@ -328,7 +337,7 @@ fun PantallaPerfil(
 
                     Surface(
                         shape = RoundedCornerShape(999.dp),
-                        color = GreenLight3
+                        color = if (pendientesSync > 0) StatusWarningSoft else GreenLight3
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -338,13 +347,13 @@ fun PantallaPerfil(
                             Box(
                                 modifier = Modifier
                                     .size(6.dp)
-                                    .background(GreenBase, CircleShape)
+                                    .background(if (pendientesSync > 0) StatusWarning else GreenBase, CircleShape)
                             )
                             Text(
-                                text = "Al día",
+                                text = if (pendientesSync > 0) "Pendiente" else "Al día",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = GreenDark2
+                                color = if (pendientesSync > 0) StatusWarningText else GreenDark2
                             )
                         }
                     }
@@ -352,11 +361,11 @@ fun PantallaPerfil(
             }
         }
 
-        // ── 5. Sync Note Figma (Todo está sincronizado) ───────────────────────
+        // ── 5. Sync Note + Acción manual ─────────────────────────────────────
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
-            color = Color(0xFFE8F8F0)
+            color = if (pendientesSync > 0) StatusWarningSoft else Color(0xFFE8F8F0)
         ) {
             Row(
                 modifier = Modifier.padding(16.dp),
@@ -367,11 +376,11 @@ fun PantallaPerfil(
                     modifier = Modifier
                         .size(24.dp)
                         .clip(CircleShape)
-                        .background(GreenDark2),
+                        .background(if (pendientesSync > 0) StatusWarning else GreenDark2),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Check,
+                        imageVector = if (pendientesSync > 0) Icons.Default.CloudUpload else Icons.Default.Check,
                         contentDescription = null,
                         tint = Color.White,
                         modifier = Modifier.size(14.dp)
@@ -379,19 +388,114 @@ fun PantallaPerfil(
                 }
                 Column {
                     Text(
-                        text = "Todo está sincronizado",
+                        text = if (pendientesSync > 0) {
+                            "$pendientesSync escaneos esperando conexión"
+                        } else {
+                            "Todo está sincronizado"
+                        },
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = GreenDark3
+                        color = if (pendientesSync > 0) StatusWarningText else GreenDark3
                     )
                     Text(
-                        text = "Tus escaneos se guardaron correctamente en el servidor.",
+                        text = if (pendientesSync > 0) {
+                            "Se reintentará automáticamente al recuperar la red."
+                        } else {
+                            "Tus escaneos se guardaron correctamente en el servidor."
+                        },
                         fontSize = 11.sp,
                         color = ColorForegroundMuted,
                         lineHeight = 16.sp
                     )
                 }
             }
+        }
+
+        if (conflictosCount > 0) {
+            Surface(
+                onClick = {
+                    eventoViewModel.cargarConflictos()
+                    mostrarDialogConflictos = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = StatusDangerSoft
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = StatusDangerText,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "$conflictosCount conflicto(s) de doble entrega",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = StatusDangerText
+                        )
+                        Text(
+                            text = "Toca para ver los escaneos ya entregados por otro dispositivo.",
+                            fontSize = 11.sp,
+                            color = StatusDangerText
+                        )
+                    }
+                }
+            }
+        }
+
+        if (pendientesOtrosUsuarios > 0) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = StatusWarningSoft
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = StatusWarningText,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "$pendientesOtrosUsuarios escaneos pendientes de otro usuario o evento guardados en este dispositivo.",
+                        fontSize = 12.sp,
+                        color = StatusWarningText,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        }
+
+        Button(
+            onClick = { eventoViewModel.forzarSincronizacion() },
+            enabled = syncState !is SyncUiState.Sincronizando,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = GreenDark2)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Sync,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = if (syncState is SyncUiState.Sincronizando) "Sincronizando..." else "Sincronizar ahora",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
 
         Spacer(modifier = Modifier.height(4.dp))
@@ -438,22 +542,90 @@ fun PantallaPerfil(
         )
     }
 
+    // ── Dialog Conflictos ─────────────────────────────────────────────────────
+    if (mostrarDialogConflictos) {
+        AlertDialog(
+            onDismissRequest = { mostrarDialogConflictos = false },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = Color.White,
+            title = {
+                Text(
+                    "Conflictos de sincronización",
+                    fontWeight = FontWeight.Bold,
+                    color = ColorForeground
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (conflictosLista.isEmpty()) {
+                        Text(
+                            "No hay detalles de conflictos disponibles.",
+                            fontSize = 13.sp,
+                            color = ColorForegroundMuted
+                        )
+                    } else {
+                        conflictosLista.take(10).forEach { conf ->
+                            val staffOrig = conf.conflictoStaffOriginal ?: "Otro operador"
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = GrayLight3,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(
+                                        text = "Participante: ${conf.participanteId.take(8)}…",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ColorForeground
+                                    )
+                                    Text(
+                                        text = "Entrega original por: $staffOrig",
+                                        fontSize = 11.sp,
+                                        color = ColorForegroundMuted
+                                    )
+                                    conf.conflictoMensaje?.let { msg ->
+                                        Text(
+                                            text = msg,
+                                            fontSize = 11.sp,
+                                            color = StatusWarningText
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { mostrarDialogConflictos = false }) {
+                    Text("Entendido", fontWeight = FontWeight.Bold, color = GreenDark2)
+                }
+            }
+        )
+    }
+
     // ── Dialog Logout ─────────────────────────────────────────────────────────
     if (mostrarDialogLogout) {
+        val tienePendientes = pendientesSync > 0
         AlertDialog(
             onDismissRequest = { mostrarDialogLogout = false },
             shape = RoundedCornerShape(20.dp),
             containerColor = Color.White,
             title = {
                 Text(
-                    "Cerrar sesión",
+                    if (tienePendientes) "Tienes escaneos sin subir" else "Cerrar sesión",
                     fontWeight = FontWeight.Bold,
-                    color = ColorForeground
+                    color = if (tienePendientes) StatusDanger else ColorForeground
                 )
             },
             text = {
                 Text(
-                    "¿Estás seguro de que deseas salir de la estación de escaneo de $nombreStaff?",
+                    if (tienePendientes) {
+                        "Aún hay $pendientesSync escaneo(s) pendientes de subir de $nombreStaff. " +
+                            "No se perderán: quedarán guardados localmente y se subirán únicamente cuando vuelvas a iniciar sesión en este dispositivo."
+                    } else {
+                        "¿Estás seguro de que deseas salir de la estación de escaneo de $nombreStaff?"
+                    },
                     color = ColorForegroundMuted
                 )
             },
@@ -467,7 +639,11 @@ fun PantallaPerfil(
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD33D3D))
                 ) {
-                    Text("Cerrar sesión", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (tienePendientes) "Salir de todos modos" else "Cerrar sesión",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             },
             dismissButton = {

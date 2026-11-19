@@ -57,7 +57,12 @@ dependencies {
 
     implementation("androidx.room:room-runtime:$room_version")
     implementation("androidx.room:room-ktx:$room_version")
+    implementation("androidx.room:room-paging:$room_version")
     ksp("androidx.room:room-compiler:$room_version")
+
+    // Paging 3 — paginación reactiva de participantes desde Room
+    implementation("androidx.paging:paging-runtime-ktx:3.3.2")
+    implementation("androidx.paging:paging-compose:3.3.2")
 
     implementation("androidx.camera:camera-core:$camerax_version")
     implementation("androidx.camera:camera-camera2:$camerax_version")

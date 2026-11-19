@@ -9,24 +9,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Worker de sincronización bidireccional Room ↔ Backend.
+ * Worker de sincronización Room ↔ Backend.
  *
- * Ejecutado por WorkManager en segundo plano cuando:
- *  - El usuario escanea un QR sin conectividad (sync diferida).
- *  - El scheduler periódico cada 15 min detecta registros pendientes.
- *
- * Flujo interno:
- *  1. Sube todos los registros con [pendienteSubida] = true (con timestamps).
- *  2. Descarga el estado canónico del servidor.
- *  3. Actualiza Room con los datos del servidor.
- *
- * Reintentos:
- *  - Máximo [MAX_RETRY_COUNT] intentos con backoff exponencial.
- *  - Configurado en [ParticipanteRepository.programarSyncUnica].
- *
- * Inyección de dependencias:
- *  - El [ParticipanteRepository] se inyecta via [SyncWorkerFactory] (sin Hilt/Dagger).
- *  - Ver [OzarApplication] para la configuración del WorkManager.
+ * Modos:
+ *  - [MODE_UPLOAD]: Sube únicamente los escaneos pendientes de la sesión activa en bucle
+ *    hasta vaciar la cola (disparado al escanear o al recuperar red).
+ *  - [MODE_FULL]: Sube pendientes y descarga el estado del servidor (periódico cada 15 min).
  */
 class SyncWorker(
     context: Context,
@@ -35,45 +23,73 @@ class SyncWorker(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        return@withContext try {
-            val syncResult = repository.sincronizarCompleto()
+        val mode = inputData.getString(KEY_MODE) ?: MODE_UPLOAD
 
-            if (syncResult.isSuccess) {
-                val stats = syncResult.getOrThrow()
-                Result.success(
-                    workDataOf(
-                        "subidos"     to stats.subidos,
-                        "descargados" to stats.descargados,
-                        "rechazados"  to stats.rechazados
-                    )
-                )
-            } else {
-                val excepcion = syncResult.exceptionOrNull()
-                if (runAttemptCount < MAX_RETRY_COUNT) {
-                    Result.retry()
-                } else {
-                    Result.failure(
-                        workDataOf("error" to (excepcion?.localizedMessage ?: "Error desconocido"))
-                    )
+        return@withContext try {
+            when (mode) {
+                MODE_UPLOAD -> {
+                    val uploadResult = repository.subirSoloPendientes()
+                    if (uploadResult.isSuccess) {
+                        val stats = uploadResult.getOrThrow()
+                        Result.success(
+                            workDataOf(
+                                "subidos" to stats.subidos,
+                                "conflictos" to stats.conflictos,
+                                "rechazados" to stats.rechazados
+                            )
+                        )
+                    } else {
+                        manejarFallo(uploadResult.exceptionOrNull())
+                    }
+                }
+                MODE_DOWNLOAD -> {
+                    val downloadResult = repository.descargarSoloCambios()
+                    if (downloadResult.isSuccess) {
+                        Result.success(workDataOf("descargados" to downloadResult.getOrThrow()))
+                    } else {
+                        manejarFallo(downloadResult.exceptionOrNull())
+                    }
+                }
+                else -> {
+                    val syncResult = repository.sincronizarCompleto()
+                    if (syncResult.isSuccess) {
+                        val stats = syncResult.getOrThrow()
+                        Result.success(
+                            workDataOf(
+                                "subidos" to stats.subidos,
+                                "descargados" to stats.descargados,
+                                "conflictos" to stats.conflictos,
+                                "rechazados" to stats.rechazados
+                            )
+                        )
+                    } else {
+                        manejarFallo(syncResult.exceptionOrNull())
+                    }
                 }
             }
         } catch (e: Exception) {
-            if (runAttemptCount < MAX_RETRY_COUNT) {
-                Result.retry()
-            } else {
-                Result.failure(workDataOf("error" to e.localizedMessage))
-            }
+            manejarFallo(e)
+        }
+    }
+
+    private fun manejarFallo(excepcion: Throwable?): Result {
+        return if (runAttemptCount < MAX_RETRY_COUNT) {
+            Result.retry()
+        } else {
+            Result.failure(
+                workDataOf("error" to (excepcion?.localizedMessage ?: "Error desconocido"))
+            )
         }
     }
 
     companion object {
-        /** Máximo número de reintentos antes de marcar el worker como fallido. */
         const val MAX_RETRY_COUNT = 3
+        const val KEY_MODE = "sync_mode"
+        const val MODE_UPLOAD = "upload"
+        const val MODE_DOWNLOAD = "download"
+        const val MODE_FULL = "full"
 
-        /** Nombre único para el OneTimeWorkRequest de sync pendiente. */
-        const val TAG_SYNC_UNICA     = "ozar_sync_unica_pendiente"
-
-        /** Nombre único para el PeriodicWorkRequest de sync cada 15 min. */
+        const val TAG_SYNC_UNICA = "ozar_sync_unica_pendiente"
         const val TAG_SYNC_PERIODICA = "ozar_sync_periodica"
     }
 }

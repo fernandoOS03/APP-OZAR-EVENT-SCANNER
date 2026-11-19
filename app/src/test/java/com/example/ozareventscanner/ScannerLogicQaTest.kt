@@ -1,623 +1,630 @@
 package com.example.ozareventscanner
 
+import androidx.paging.PagingSource
+import com.example.ozareventscanner.data.BeneficioConteo
+import com.example.ozareventscanner.data.BeneficioEntity
+import com.example.ozareventscanner.data.EscaneoEntity
+import com.example.ozareventscanner.data.ParticipanteConEscaneosRelation
 import com.example.ozareventscanner.data.ParticipanteDao
 import com.example.ozareventscanner.data.ParticipanteEntity
 import com.example.ozareventscanner.data.ParticipanteRepository
 import com.example.ozareventscanner.data.ScanResultado
+import com.example.ozareventscanner.data.SyncMetaEntity
 import com.example.ozareventscanner.network.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.Protocol
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import retrofit2.HttpException
 import java.io.IOException
+import java.util.UUID
 
 /**
- * ═════════════════════════════════════════════════════════════════════════════
- * AGENTE QA: SUITE DE PRUEBAS AUTOMATIZADAS DE LÓGICA DE ESCANEO Y NEGOCIO
- * ═════════════════════════════════════════════════════════════════════════════
- *
- * Verifica exhaustivamente:
- *  1. Validación del Login (DNI y PIN de staff, modelo único hardcodeado).
- *  2. Extracción y análisis sintáctico de formatos QR (URLs, JSON, Raw).
- *  3. Validación estricta de Correos Electrónicos ("si el correo no es válido que sea no válido").
- *  4. Escaneo fidedigno sin inventar participantes ("no puede inventar si no existe").
- *  5. Detección precisa de doble escaneo (YaEscaneado).
- *  6. Persistencia y sincronización offline-first con Room (pendienteSubida / confirmación).
+ * Pruebas unitarias de Fase A (Integridad de datos, Offline-first, Aislamiento por sesión/evento y Sync).
  */
 class ScannerLogicQaTest {
 
-    // ── DAO Simulado en Memoria para pruebas unitarias de persistencia ────────
     private class FakeParticipanteDao : ParticipanteDao {
         val participantesDb = mutableMapOf<String, ParticipanteEntity>()
-
-        fun cargarIniciales(lista: List<ParticipanteEntity>) {
-            participantesDb.clear()
-            lista.forEach { participantesDb[it.idParticipante] = it }
-        }
+        val beneficiosDb = mutableMapOf<String, BeneficioEntity>()
+        val escaneosDb = mutableMapOf<Pair<String, String>, EscaneoEntity>()
+        val metaDb = mutableMapOf<String, String>()
 
         override suspend fun insertarParticipantes(participantes: List<ParticipanteEntity>) {
             participantes.forEach { participantesDb[it.idParticipante] = it }
+        }
+
+        override suspend fun insertarBeneficios(beneficios: List<BeneficioEntity>) {
+            beneficios.forEach { beneficiosDb[it.id] = it }
+        }
+
+        override suspend fun upsertEscaneos(escaneos: List<EscaneoEntity>) {
+            escaneos.forEach { escaneosDb[it.participanteId to it.beneficioId] = it }
+        }
+
+        override suspend fun upsertEscaneo(escaneo: EscaneoEntity) {
+            escaneosDb[escaneo.participanteId to escaneo.beneficioId] = escaneo
+        }
+
+        override suspend fun upsertSyncMeta(meta: SyncMetaEntity) {
+            metaDb[meta.clave] = meta.valor
         }
 
         override suspend fun buscarParticipante(id: String): ParticipanteEntity? {
             val limpio = id.trim()
             return participantesDb.values.find {
                 it.idParticipante == limpio ||
-                (it.documento != null && it.documento == limpio) ||
-                (it.correo != null && it.correo.equals(limpio, ignoreCase = true))
+                    (it.documento != null && it.documento == limpio) ||
+                    (it.correo != null && it.correo.equals(limpio, ignoreCase = true))
             }
         }
 
         override suspend fun obtenerTodos(): List<ParticipanteEntity> =
             participantesDb.values.sortedBy { it.nombre }
 
+        override fun pagingTodos(): PagingSource<Int, ParticipanteConEscaneosRelation> =
+            throw UnsupportedOperationException("No requerido en unit test sin Room")
+
+        override fun pagingBuscarPorPrefijo(prefix: String): PagingSource<Int, ParticipanteConEscaneosRelation> =
+            throw UnsupportedOperationException("No requerido en unit test sin Room")
+
+        override fun observarConteoPorBeneficio(): Flow<List<BeneficioConteo>> =
+            flowOf(
+                escaneosDb.values
+                    .filter { it.entregado && it.syncError == null }
+                    .groupBy { it.beneficioId }
+                    .map { (id, list) -> BeneficioConteo(id, list.size) }
+            )
+
+        override fun observarTotalParticipantesEscaneados(): Flow<Int> =
+            flowOf(
+                escaneosDb.values
+                    .filter { it.entregado && it.syncError == null }
+                    .map { it.participanteId }
+                    .distinct()
+                    .size
+            )
+
+        override fun observarEscaneosEntregados(): Flow<List<EscaneoEntity>> =
+            flowOf(escaneosDb.values.filter { it.entregado && it.syncError == null })
+
         override suspend fun contarTotalParticipantes(): Int = participantesDb.size
 
-        override fun observarTotalParticipantes(): Flow<Int> =
-            flowOf(participantesDb.size)
+        override fun observarTotalParticipantes(): Flow<Int> = flowOf(participantesDb.size)
 
         override suspend fun buscarPorNombreOId(query: String): List<ParticipanteEntity> {
             val q = query.trim().lowercase()
             return participantesDb.values.filter {
                 it.nombre.lowercase().contains(q) ||
-                it.idParticipante.lowercase().contains(q) ||
-                (it.documento?.lowercase()?.contains(q) == true) ||
-                (it.correo?.lowercase()?.contains(q) == true)
+                    it.idParticipante.lowercase().contains(q) ||
+                    (it.documento?.lowercase()?.contains(q) == true) ||
+                    (it.correo?.lowercase()?.contains(q) == true)
             }.sortedBy { it.nombre }
         }
 
-        override suspend fun actualizarBeneficio(id: String, entregado: Boolean) {
-            val p = buscarParticipante(id) ?: return
-            participantesDb[p.idParticipante] = p.copy(beneficioEntregado = entregado)
+        override suspend fun obtenerTodosEscaneos(): List<EscaneoEntity> = escaneosDb.values.toList()
+
+        override fun observarEscaneos(): Flow<List<EscaneoEntity>> = flowOf(escaneosDb.values.toList())
+
+        override suspend fun obtenerEscaneosDeParticipante(participanteId: String): List<EscaneoEntity> =
+            escaneosDb.values.filter { it.participanteId == participanteId }
+
+        override suspend fun obtenerEscaneosDeParticipantes(participanteIds: List<String>): List<EscaneoEntity> {
+            val idSet = participanteIds.toSet()
+            return escaneosDb.values.filter { it.participanteId in idSet }
         }
 
-        override suspend fun marcarEscaneoLocalConAuditoria(
-            id: String,
-            timestamp: Long,
-            staffId: String?,
-            staffNombre: String?,
-            deviceId: String?,
-            beneficioId: String?
-        ) {
-            val p = buscarParticipante(id) ?: return
-            participantesDb[p.idParticipante] = p.copy(
-                beneficioEntregado = true,
-                timestampEscaneo = timestamp,
-                pendienteSubida = true,
-                sincronizadoConBackend = false,
-                scannedByStaffId = staffId,
-                scannedByStaffNombre = staffNombre,
-                scannedByDeviceId = deviceId,
-                beneficioId = beneficioId
-            )
-        }
+        override suspend fun obtenerEscaneo(participanteId: String, beneficioId: String): EscaneoEntity? =
+            escaneosDb[participanteId to beneficioId]
 
-        override suspend fun marcarEscaneoConfirmadoConAuditoria(
-            id: String,
-            timestamp: Long,
+        override suspend fun obtenerPendientesSync(): List<EscaneoEntity> =
+            escaneosDb.values.filter { it.pendienteSubida && it.syncError == null }
+                .sortedBy { it.timestampEscaneo ?: 0L }
+
+        override suspend fun obtenerPendientesSyncDeSesion(
+            eventoId: String,
             staffId: String?,
-            staffNombre: String?,
-            deviceId: String?,
-            beneficioId: String?
+            limit: Int
+        ): List<EscaneoEntity> = escaneosDb.values
+            .filter {
+                it.pendienteSubida &&
+                    it.syncError == null &&
+                    (it.eventoId == eventoId || it.eventoId.isEmpty()) &&
+                    (staffId == null || it.scannedByStaffId == null || it.scannedByStaffId == staffId)
+            }
+            .sortedBy { it.timestampEscaneo ?: 0L }
+            .take(limit)
+
+        override suspend fun contarPendientesSyncDeSesion(eventoId: String, staffId: String?): Int =
+            obtenerPendientesSyncDeSesion(eventoId, staffId, Int.MAX_VALUE).size
+
+        override fun observarPendientesSync(): Flow<Int> =
+            flowOf(escaneosDb.values.count { it.pendienteSubida && it.syncError == null })
+
+        override fun observarPendientesSyncDeSesion(eventoId: String, staffId: String?): Flow<Int> =
+            flowOf(escaneosDb.values.count {
+                it.pendienteSubida &&
+                    it.syncError == null &&
+                    (it.eventoId == eventoId || it.eventoId.isEmpty()) &&
+                    (staffId == null || it.scannedByStaffId == null || it.scannedByStaffId == staffId)
+            })
+
+        override fun observarPendientesOtrosUsuarios(eventoId: String, staffId: String?): Flow<Int> =
+            flowOf(escaneosDb.values.count {
+                it.pendienteSubida &&
+                    it.syncError == null &&
+                    ((it.eventoId.isNotEmpty() && it.eventoId != eventoId) ||
+                        (staffId != null && it.scannedByStaffId != null && it.scannedByStaffId != staffId))
+            })
+
+        override fun observarConflictosCount(eventoId: String): Flow<Int> =
+            flowOf(escaneosDb.values.count { it.conflicto && (it.eventoId == eventoId || it.eventoId.isEmpty()) })
+
+        override suspend fun obtenerConflictos(eventoId: String): List<EscaneoEntity> =
+            escaneosDb.values.filter { it.conflicto && (it.eventoId == eventoId || it.eventoId.isEmpty()) }
+
+        override suspend fun marcarEscaneoSincronizado(
+            participanteId: String,
+            beneficioId: String,
+            timestamp: Long?
         ) {
-            val p = buscarParticipante(id) ?: return
-            participantesDb[p.idParticipante] = p.copy(
-                beneficioEntregado = true,
-                timestampEscaneo = timestamp,
-                pendienteSubida = false,
+            val key = participanteId to beneficioId
+            val current = escaneosDb[key] ?: return
+            escaneosDb[key] = current.copy(
                 sincronizadoConBackend = true,
-                scannedByStaffId = staffId,
-                scannedByStaffNombre = staffNombre,
-                scannedByDeviceId = deviceId,
-                beneficioId = beneficioId
+                pendienteSubida = false,
+                syncError = null,
+                conflicto = false,
+                timestampEscaneo = timestamp
             )
         }
 
+        override suspend fun marcarEscaneoConflictoYaEntregado(
+            participanteId: String,
+            beneficioId: String,
+            timestampOriginal: Long?,
+            staffOriginalNombre: String?,
+            mensaje: String?
+        ) {
+            val key = participanteId to beneficioId
+            val current = escaneosDb[key] ?: return
+            escaneosDb[key] = current.copy(
+                entregado = true,
+                sincronizadoConBackend = true,
+                pendienteSubida = false,
+                syncError = null,
+                timestampEscaneo = timestampOriginal ?: current.timestampEscaneo,
+                scannedByStaffNombre = staffOriginalNombre ?: current.scannedByStaffNombre,
+                conflicto = true,
+                conflictoStaffOriginal = staffOriginalNombre,
+                conflictoFechaOriginal = timestampOriginal,
+                conflictoMensaje = mensaje
+            )
+        }
 
-        override suspend fun obtenerPendientesSync(): List<ParticipanteEntity> =
-            participantesDb.values.filter { it.pendienteSubida }
+        override suspend fun marcarEscaneoConError(
+            participanteId: String,
+            beneficioId: String,
+            error: String
+        ) {
+            val key = participanteId to beneficioId
+            val current = escaneosDb[key] ?: return
+            escaneosDb[key] = current.copy(
+                pendienteSubida = false,
+                sincronizadoConBackend = false,
+                syncError = error
+            )
+        }
 
-        override suspend fun marcarLoteComoSincronizado(ids: List<String>) {
-            ids.forEach { id ->
-                val p = participantesDb[id]
-                if (p != null) {
-                    participantesDb[id] = p.copy(
-                        sincronizadoConBackend = true,
-                        pendienteSubida = false
-                    )
-                }
+        override suspend fun borrarEscaneoConfirmado(participanteId: String, beneficioId: String) {
+            val key = participanteId to beneficioId
+            val current = escaneosDb[key] ?: return
+            if (!current.pendienteSubida && current.sincronizadoConBackend) {
+                escaneosDb.remove(key)
             }
         }
 
-        override suspend fun revertirEscaneoRechazado(id: String) {
-            val p = buscarParticipante(id) ?: return
-            participantesDb[p.idParticipante] = p.copy(
-                beneficioEntregado = false,
-                timestampEscaneo = null,
-                pendienteSubida = false,
-                sincronizadoConBackend = true
-            )
+        override suspend fun limpiarParticipantesSincronizadosDeOtrosEventos(eventoIdActual: String) {
+            val idsConPendientes = escaneosDb.values.filter { it.pendienteSubida }.map { it.participanteId }.toSet()
+            participantesDb.entries.removeIf { (_, p) ->
+                p.eventoId != eventoIdActual && p.idParticipante !in idsConPendientes
+            }
         }
 
-        override suspend fun sincronizarDesdeBackend(participantes: List<ParticipanteEntity>) {
-            insertarParticipantes(participantes)
+        override suspend fun limpiarEscaneosSincronizadosDeOtrosEventos(eventoIdActual: String) {
+            escaneosDb.entries.removeIf { (_, e) -> e.eventoId != eventoIdActual && !e.pendienteSubida }
         }
+
+        override suspend fun limpiarBeneficiosDeOtrosEventos(eventoIdActual: String) {
+            beneficiosDb.entries.removeIf { (_, b) -> b.eventoId != null && b.eventoId != eventoIdActual }
+        }
+
+        override suspend fun eliminarParticipantesSinPendientes(ids: List<String>) {
+            val idsConPendientes = escaneosDb.values.filter { it.pendienteSubida }.map { it.participanteId }.toSet()
+            val target = ids.toSet()
+            participantesDb.entries.removeIf { (id, _) -> id in target && id !in idsConPendientes }
+        }
+
+        override suspend fun obtenerBeneficios(): List<BeneficioEntity> =
+            beneficiosDb.values.sortedBy { it.orden }
+
+        override suspend fun obtenerBeneficioPorId(id: String): BeneficioEntity? = beneficiosDb[id]
+
+        override suspend fun obtenerBeneficiosActivos(): List<BeneficioEntity> =
+            beneficiosDb.values.filter { it.estado }.sortedBy { it.orden }
+
+        override fun observarBeneficiosActivos(): Flow<List<BeneficioEntity>> =
+            flowOf(beneficiosDb.values.filter { it.estado }.sortedBy { it.orden })
+
+        override suspend fun obtenerMeta(clave: String): String? = metaDb[clave]
     }
 
-    // ── ApiService Simulado para pruebas de red y mock ────────────────────────
     private class FakeApiService : ApiService {
-        var debeLanzarErrorDeRed = false
-
-        val asistentesRegistrados = mutableListOf(
-            ParticipanteSyncDto("10482914", "María Camila Pérez", beneficioEntregado = true, timestampEscaneo = 1719224130000L, documento = "10482914", correo = "maria.perez@zendov.com"),
-            ParticipanteSyncDto("28491023", "Andrés Rodríguez", beneficioEntregado = false, timestampEscaneo = null, documento = "28491023", correo = "andres.rodriguez@zendov.com"),
-            ParticipanteSyncDto("19482019", "Carlos Andrés Gómez", beneficioEntregado = true, timestampEscaneo = 1719223000000L, documento = "19482019", correo = "carlos.gomez@zendov.com"),
-            ParticipanteSyncDto("30192841", "Valeria Sofía Martínez", beneficioEntregado = false, timestampEscaneo = null, documento = "30192841", correo = "valeria.martinez@zendov.com")
+        var uploadHandler: ((SyncUploadRequest) -> SyncUploadResponse)? = null
+        var downloadHandler: ((String, Long?, Int?, Int?) -> SyncDownloadResponse)? = null
+        var downloadResponse: SyncDownloadResponse = SyncDownloadResponse(
+            participantes = emptyList(),
+            totalEscaneados = 0,
+            timestampServidor = 1_700_000_000_000L
         )
 
-        val escaneosRegistrados = mutableSetOf<String>()
+        override suspend fun loginStaff(request: StaffLoginRequest): StaffLoginResponse =
+            throw UnsupportedOperationException()
 
-        override suspend fun loginStaff(request: StaffLoginRequest): StaffLoginResponse {
-            if (debeLanzarErrorDeRed) throw IOException("Sin conexión a api-eventos.zendov.com")
+        override suspend fun obtenerBeneficiosActivos(eventoId: String): List<BeneficioActivoDto> = emptyList()
 
-            val dni = request.documentoIdentidad.trim()
-            val pin = request.pinAcceso.trim()
-
-            // Solo el staff oficial hardcodeado está permitido
-            if (dni == "12345678" && pin == "654321") {
-                return StaffLoginResponse(
-                    token = "eyJhbGciOiJIUzI1NiJ9.demo",
-                    staff = StaffDataDto(
-                        staffId = "STF-025",
-                        nombreCompleto = "Luis Mendoza",
-                        documentoIdentidad = "12345678",
-                        rol = "Coordinador de accesos",
-                        cargo = "Coordinador de accesos",
-                        evento = EventoStaffDto("EVT-025", "Zendov Tech Summit 2025", "zendov-summit-2025", "tenant_zendov_2025")
-                    )
-                )
-            } else {
-                val errorBody = """{"error":"Unauthorized","message":"Credenciales no válidas o no autorizadas"}""".toResponseBody("application/json".toMediaType())
-                throw HttpException(retrofit2.Response.error<StaffLoginResponse>(401, errorBody))
-            }
-        }
-
-        override suspend fun obtenerBeneficiosActivos(eventoId: String): List<BeneficioActivoDto> {
-            return listOf(
-                BeneficioActivoDto("ben-001-kit", "Kit de bienvenida", 1, true, "EVT-025", "Zendov Tech Summit 2025", "Bolso + credencial"),
-                BeneficioActivoDto("ben-002-almuerzo", "Almuerzo ejecutivo", 2, true, "EVT-025", "Zendov Tech Summit 2025", "Salón principal")
-            )
-        }
-
-        override suspend fun registrarEscaneo(request: RegistrarEscaneoRequest): RegistrarEscaneoResponse {
-            if (debeLanzarErrorDeRed) throw IOException("Sin conexión a api-eventos.zendov.com")
-
-            val target = (request.participanteId ?: request.documentoIdentidad ?: "").trim()
-
-            // Buscar en asistentes registrados
-            val encontrado = asistentesRegistrados.find {
-                it.idParticipante.equals(target, ignoreCase = true) ||
-                (it.documento != null && it.documento.equals(target, ignoreCase = true)) ||
-                (it.correo != null && it.correo.equals(target, ignoreCase = true))
-            }
-
-            if (encontrado == null) {
-                // Participante no existe: NO INVENTAR NADA, responder 404
-                val errorBody = """{"error":"NotFound","message":"Participante no encontrado con el código o correo: $target"}""".toResponseBody("application/json".toMediaType())
-                throw HttpException(retrofit2.Response.error<RegistrarEscaneoResponse>(404, errorBody))
-            }
-
-            val key = "${encontrado.idParticipante}_${request.beneficioId}"
-            val yaEntregado = encontrado.beneficioEntregado || escaneosRegistrados.contains(key)
-
-            return if (yaEntregado) {
-                RegistrarEscaneoResponse(
-                    escaneoId = "esc-previo",
-                    participanteId = encontrado.idParticipante,
-                    participanteNombreCompleto = encontrado.nombre,
-                    documentoIdentidad = encontrado.documento,
-                    beneficioId = request.beneficioId,
-                    beneficioNombre = "Kit de bienvenida",
-                    yaEntregadoPreviamente = true,
-                    mensaje = "ATENCIÓN: Este beneficio YA FUE ENTREGADO previamente a ${encontrado.nombre}",
-                    fechaEscaneo = "2025-06-24T09:30:00",
-                    staffNombre = "Luis Mendoza"
-                )
-            } else {
-                escaneosRegistrados.add(key)
-                RegistrarEscaneoResponse(
-                    escaneoId = "esc-${System.currentTimeMillis()}",
-                    participanteId = encontrado.idParticipante,
-                    participanteNombreCompleto = encontrado.nombre,
-                    documentoIdentidad = encontrado.documento,
-                    beneficioId = request.beneficioId,
-                    beneficioNombre = "Kit de bienvenida",
-                    yaEntregadoPreviamente = false,
-                    mensaje = "Beneficio entregado exitosamente a ${encontrado.nombre}",
-                    fechaEscaneo = "2025-06-24T10:15:30",
-                    staffNombre = "Luis Mendoza"
-                )
-            }
-        }
+        override suspend fun registrarEscaneo(request: RegistrarEscaneoRequest): RegistrarEscaneoResponse =
+            throw UnsupportedOperationException()
 
         override suspend fun subirEscaneos(request: SyncUploadRequest): SyncUploadResponse {
-            val confirmados = mutableListOf<EscaneoConfirmado>()
-            request.escaneos.forEach { esc ->
-                val existe = asistentesRegistrados.any { it.idParticipante == esc.idParticipante }
-                confirmados.add(EscaneoConfirmado(esc.idParticipante, validado = existe, timestampValidado = if (existe) esc.timestampEscaneo else null))
-            }
-            return SyncUploadResponse(
-                confirmados = confirmados.count { it.validado },
-                rechazados = confirmados.count { !it.validado },
-                resultados = confirmados
-            )
+            return uploadHandler?.invoke(request)
+                ?: SyncUploadResponse(
+                    confirmados = request.escaneos.size,
+                    rechazados = 0,
+                    resultados = request.escaneos.map {
+                        EscaneoConfirmado(
+                            idParticipante = it.idParticipante,
+                            beneficioId = it.beneficioId,
+                            validado = true,
+                            estado = EscaneoConfirmado.ESTADO_CONFIRMADO,
+                            timestampValidado = it.timestampEscaneo
+                        )
+                    }
+                )
         }
 
-        override suspend fun descargarEstado(): SyncDownloadResponse {
-            return SyncDownloadResponse(
-                participantes = asistentesRegistrados,
-                totalEscaneados = asistentesRegistrados.count { it.beneficioEntregado },
-                timestampServidor = System.currentTimeMillis()
-            )
-        }
+        override suspend fun descargarEstado(
+            eventoId: String,
+            since: Long?,
+            page: Int?,
+            size: Int?
+        ): SyncDownloadResponse = downloadHandler?.invoke(eventoId, since, page, size) ?: downloadResponse
     }
 
     private lateinit var fakeDao: FakeParticipanteDao
     private lateinit var fakeApi: FakeApiService
     private lateinit var repository: ParticipanteRepository
 
+    private var online = true
+    private var uploadScheduledCount = 0
+    private var currentSession = ParticipanteRepository.SessionInfo(
+        eventoId = "evt-1",
+        staffId = "staff-A",
+        staffNombre = "Luis Mendoza"
+    )
+
+    private val partId1 = UUID.randomUUID().toString()
+    private val benId1 = UUID.randomUUID().toString()
+    private val benId2 = UUID.randomUUID().toString()
+
     @Before
     fun setUp() {
         fakeDao = FakeParticipanteDao()
         fakeApi = FakeApiService()
+        online = true
+        uploadScheduledCount = 0
+        currentSession = ParticipanteRepository.SessionInfo("evt-1", "staff-A", "Luis Mendoza")
 
-        // Sembrar datos mock iniciales en el FakeDao
-        fakeDao.cargarIniciales(listOf(
-            ParticipanteEntity("10482914", "María Camila Pérez", beneficioEntregado = true, timestampEscaneo = 1719224130000L, documento = "10482914", correo = "maria.perez@zendov.com"),
-            ParticipanteEntity("28491023", "Andrés Rodríguez", beneficioEntregado = false, timestampEscaneo = null, documento = "28491023", correo = "andres.rodriguez@zendov.com"),
-            ParticipanteEntity("19482019", "Carlos Andrés Gómez", beneficioEntregado = true, timestampEscaneo = 1719223000000L, documento = "19482019", correo = "carlos.gomez@zendov.com"),
-            ParticipanteEntity("30192841", "Valeria Sofía Martínez", beneficioEntregado = false, timestampEscaneo = null, documento = "30192841", correo = "valeria.martinez@zendov.com")
-        ))
-
-        // Para pruebas unitarias que no invocan WorkManager, el contexto puede ser null o mockeado si se prueba repository
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECCIÓN 1: VALIDACIÓN DE LOGIN (DOCUMENTO Y CÓDIGO GENERADO PIN)
-    // ═════════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun testLogin_staffOficialHardcodeado_validaExitosamente() = runBlocking {
-        val respuesta = fakeApi.loginStaff(StaffLoginRequest(
-            documentoIdentidad = "12345678",
-            pinAcceso = "654321"
-        ))
-
-        assertNotNull(respuesta.token)
-        assertEquals("Luis Mendoza", respuesta.staff.nombreCompleto)
-        assertEquals("STF-025", respuesta.staff.staffId)
-        assertEquals("EVT-025", respuesta.staff.evento.eventoId)
-    }
-
-    @Test
-    fun testLogin_staffNoAutorizado_rechazaConHttp401() = runBlocking {
-        try {
-            fakeApi.loginStaff(StaffLoginRequest(
-                documentoIdentidad = "87654321",
-                pinAcceso = "123456"
-            ))
-            fail("Debió lanzar HttpException 401 por credenciales no autorizadas")
-        } catch (e: HttpException) {
-            assertEquals(401, e.code())
+        runBlocking {
+            fakeDao.insertarParticipantes(
+                listOf(
+                    ParticipanteEntity(
+                        idParticipante = partId1,
+                        nombre = "María Camila Pérez",
+                        documento = "10482914",
+                        correo = "maria.perez@zendov.com",
+                        eventoId = "evt-1"
+                    )
+                )
+            )
+            fakeDao.insertarBeneficios(
+                listOf(
+                    BeneficioEntity(benId1, "Kit de bienvenida", 1, true, "evt-1"),
+                    BeneficioEntity(benId2, "Almuerzo ejecutivo", 2, true, "evt-1")
+                )
+            )
         }
+
+        repository = ParticipanteRepository(
+            dao = fakeDao,
+            apiService = fakeApi,
+            context = null,
+            sessionProvider = { currentSession },
+            deviceIdProvider = { "uuid-device-001" },
+            connectivityChecker = { online },
+            uploadScheduler = { uploadScheduledCount++ }
+        )
     }
 
     @Test
-    fun testLogin_documentoInvalido_rechazaConHttp401() = runBlocking {
-        try {
-            fakeApi.loginStaff(StaffLoginRequest(
-                documentoIdentidad = "00000000",
-                pinAcceso = "654321"
-            ))
-            fail("Debió lanzar HttpException 401 al usar documento no registrado")
-        } catch (e: HttpException) {
-            assertEquals(401, e.code())
+    fun qrFormatoEstricto_soloAceptaUuid() {
+        assertTrue(repository.esFormatoQrValido(partId1))
+        assertFalse(repository.esFormatoQrValido("10482914"))
+        assertFalse(repository.esFormatoQrValido("maria.perez@zendov.com"))
+        assertFalse(repository.esFormatoQrValido("   "))
+    }
+
+    @Test
+    fun registrarEscaneo_offlinePersisteConEventoStaffYDeviceIdYProgramaUpload() = runBlocking {
+        online = false
+        val res = repository.registrarEscaneo(partId1, benId1)
+
+        assertTrue(res is ScanResultado.Valido)
+        assertEquals(1, uploadScheduledCount)
+
+        val guardado = fakeDao.obtenerEscaneo(partId1, benId1)
+        assertNotNull(guardado)
+        assertEquals("evt-1", guardado!!.eventoId)
+        assertEquals("staff-A", guardado.scannedByStaffId)
+        assertEquals("uuid-device-001", guardado.scannedByDeviceId)
+        assertTrue(guardado.pendienteSubida)
+        assertFalse(guardado.sincronizadoConBackend)
+
+        // Segundo escaneo del mismo beneficio devuelve YaEscaneado
+        val res2 = repository.registrarEscaneo(partId1, benId1)
+        assertTrue(res2 is ScanResultado.YaEscaneado)
+    }
+
+    @Test
+    fun subirSoloPendientes_sinConexionFallaYMantienePendiente() = runBlocking {
+        repository.registrarEscaneo(partId1, benId1)
+        online = false
+
+        val result = repository.subirSoloPendientes()
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is IOException)
+
+        val guardado = fakeDao.obtenerEscaneo(partId1, benId1)!!
+        assertTrue(guardado.pendienteSubida)
+        assertFalse(guardado.sincronizadoConBackend)
+    }
+
+    @Test
+    fun subirSoloPendientes_soloSubeEscaneosDeLaSesionActiva() = runBlocking {
+        // Staff A escanea benId1 en evt-1
+        repository.registrarEscaneo(partId1, benId1)
+
+        // Cambia de usuario a Staff B en evt-2
+        currentSession = ParticipanteRepository.SessionInfo("evt-2", "staff-B", "Ana Torres")
+        var llamadosUpload = 0
+        fakeApi.uploadHandler = { req ->
+            llamadosUpload++
+            SyncUploadResponse(0, 0, emptyList())
         }
-    }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECCIÓN 2: EXTRACCIÓN Y VALIDACIÓN DE FORMATO QR
-    // ═════════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun testQrExtraction_rawPlano_extraeCorrectamente() {
-        // Objeto dummy para invocar métodos de extracción
-        val valor = extraerValorQrMock("10482914")
-        assertEquals("10482914", valor)
-
-        val correo = extraerValorQrMock("maria.perez@zendov.com")
-        assertEquals("maria.perez@zendov.com", correo)
+        val res = repository.subirSoloPendientes()
+        assertTrue(res.isSuccess)
+        assertEquals(0, llamadosUpload)
+        // El escaneo de Staff A sigue intacto y pendiente en Room
+        assertTrue(fakeDao.obtenerEscaneo(partId1, benId1)!!.pendienteSubida)
     }
 
     @Test
-    fun testQrExtraction_jsonEstructurado_extraeCampoRelevante() {
-        val jsonId = """{"id": "10482914", "evento": "EVT-025"}"""
-        assertEquals("10482914", extraerValorQrMock(jsonId))
+    fun subirSoloPendientes_emparejaPorBeneficioIdYMarcaConflictoYaEntregado() = runBlocking {
+        repository.registrarEscaneo(partId1, benId1)
+        repository.registrarEscaneo(partId1, benId2)
 
-        val jsonCorreo = """{"correo": "andres.rodriguez@zendov.com"}"""
-        assertEquals("andres.rodriguez@zendov.com", extraerValorQrMock(jsonCorreo))
-
-        val jsonDoc = """{"documento": "28491023"}"""
-        assertEquals("28491023", extraerValorQrMock(jsonDoc))
-    }
-
-    @Test
-    fun testQrExtraction_urlAcreditacion_extraeQueryOPath() {
-        val urlParam = "https://api-eventos.zendov.com/ticket?code=10482914"
-        assertEquals("10482914", extraerValorQrMock(urlParam))
-
-        val urlPath = "https://zendov.com/participantes/28491023"
-        assertEquals("28491023", extraerValorQrMock(urlPath))
-    }
-
-    @Test
-    fun testQrValidation_correosValidos_retornaTrue() {
-        assertTrue(esFormatoQrValidoMock("maria.perez@zendov.com"))
-        assertTrue(esFormatoQrValidoMock("andres_rodriguez@gmail.com"))
-        assertTrue(esFormatoQrValidoMock("staff.acceso+test@empresa.com.pe"))
-    }
-
-    @Test
-    fun testQrValidation_correosInvalidos_retornaFalse() {
-        // "si el correo no es valido que sea no valido"
-        assertFalse(esFormatoQrValidoMock("correo_sin_arroba.com"))
-        assertFalse(esFormatoQrValidoMock("usuario@"))
-        assertFalse(esFormatoQrValidoMock("@dominio.com"))
-        assertFalse(esFormatoQrValidoMock("usuario@dominio")) // sin TLD
-        assertFalse(esFormatoQrValidoMock("usuario espaciado@zendov.com"))
-        assertFalse(esFormatoQrValidoMock("usuario<nombre>@zendov.com"))
-    }
-
-    @Test
-    fun testQrValidation_codigosIdsValidos_retornaTrue() {
-        assertTrue(esFormatoQrValidoMock("10482914"))
-        assertTrue(esFormatoQrValidoMock("PAR-025-99"))
-        assertTrue(esFormatoQrValidoMock("TICKET_ABC_123"))
-    }
-
-    @Test
-    fun testQrValidation_codigosInvalidos_retornaFalse() {
-        assertFalse(esFormatoQrValidoMock(""))
-        assertFalse(esFormatoQrValidoMock("   "))
-        assertFalse(esFormatoQrValidoMock("codigo con espacios"))
-        assertFalse(esFormatoQrValidoMock("codigo\ncon\nsaltos"))
-        assertFalse(esFormatoQrValidoMock("A".repeat(101))) // mayor a 100 caracteres
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECCIÓN 3: ESCANEO FIDEDIGNO SIN INVENTAR ("NO PUEDE INVENTAR")
-    // ═════════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun testScan_correoNoRegistrado_retorna404YNoInventaParticipante() = runBlocking {
-        // Un correo sintácticamente válido pero que NO pertenece a ningún participante
-        val correoFantasma = "hacker.desconocido@noexiste.com"
-
-        try {
-            fakeApi.registrarEscaneo(RegistrarEscaneoRequest(
-                beneficioId = "ben-001-kit",
-                participanteId = correoFantasma
-            ))
-            fail("Debió retornar 404 Not Found porque el participante no existe. ¡No debe inventar!")
-        } catch (e: HttpException) {
-            assertEquals(404, e.code())
+        val tsOriginal = 1_700_000_000_000L
+        fakeApi.uploadHandler = { req ->
+            assertEquals(2, req.escaneos.size)
+            SyncUploadResponse(
+                confirmados = 1,
+                rechazados = 1,
+                resultados = listOf(
+                    EscaneoConfirmado(
+                        idParticipante = partId1,
+                        beneficioId = benId1,
+                        validado = false,
+                        estado = EscaneoConfirmado.ESTADO_YA_ENTREGADO,
+                        timestampValidado = tsOriginal,
+                        staffOriginalNombre = "Operador Previo",
+                        mensaje = "Ya entregado previamente"
+                    ),
+                    EscaneoConfirmado(
+                        idParticipante = partId1,
+                        beneficioId = benId2,
+                        validado = true,
+                        estado = EscaneoConfirmado.ESTADO_CONFIRMADO,
+                        timestampValidado = 1_700_000_500_000L
+                    )
+                )
+            )
         }
+
+        val result = repository.subirSoloPendientes()
+        assertTrue(result.isSuccess)
+        val stats = result.getOrThrow()
+        assertEquals(1, stats.subidos)
+        assertEquals(1, stats.conflictos)
+        assertEquals(0, stats.rechazados)
+
+        val esc1 = fakeDao.obtenerEscaneo(partId1, benId1)!!
+        assertTrue(esc1.entregado)
+        assertTrue(esc1.sincronizadoConBackend)
+        assertFalse(esc1.pendienteSubida)
+        assertNull(esc1.syncError)
+        assertTrue(esc1.conflicto)
+        assertEquals("Operador Previo", esc1.conflictoStaffOriginal)
+        assertEquals(tsOriginal, esc1.conflictoFechaOriginal)
+
+        val esc2 = fakeDao.obtenerEscaneo(partId1, benId2)!!
+        assertTrue(esc2.sincronizadoConBackend)
+        assertFalse(esc2.pendienteSubida)
+        assertFalse(esc2.conflicto)
     }
 
     @Test
-    fun testScan_codigoNoRegistrado_retorna404() = runBlocking {
-        val codigoInexistente = "COD-999999"
+    fun subirSoloPendientes_resultadoOmitidoPorServidorEsReintentableYNoBloquea() = runBlocking {
+        repository.registrarEscaneo(partId1, benId1)
+        repository.registrarEscaneo(partId1, benId2)
 
-        try {
-            fakeApi.registrarEscaneo(RegistrarEscaneoRequest(
-                beneficioId = "ben-001-kit",
-                participanteId = codigoInexistente
-            ))
-            fail("Debió fallar con 404 para código inexistente")
-        } catch (e: HttpException) {
-            assertEquals(404, e.code())
+        // El servidor solo devuelve resultado para benId1 y omite benId2
+        fakeApi.uploadHandler = {
+            SyncUploadResponse(
+                confirmados = 1,
+                rechazados = 0,
+                resultados = listOf(
+                    EscaneoConfirmado(
+                        idParticipante = partId1,
+                        beneficioId = benId1,
+                        validado = true,
+                        estado = EscaneoConfirmado.ESTADO_CONFIRMADO,
+                        timestampValidado = System.currentTimeMillis()
+                    )
+                )
+            )
         }
+
+        val result = repository.subirSoloPendientes()
+        assertTrue(result.isFailure)
+
+        val esc1 = fakeDao.obtenerEscaneo(partId1, benId1)!!
+        assertTrue(esc1.sincronizadoConBackend)
+        assertFalse(esc1.pendienteSubida)
+
+        val esc2 = fakeDao.obtenerEscaneo(partId1, benId2)!!
+        assertTrue("El escaneo omitido debe seguir pendiente para reintentarse", esc2.pendienteSubida)
+        assertNull("No debe marcarse con syncError permanente", esc2.syncError)
     }
 
     @Test
-    fun testScan_participanteValidoPorId_retornaValido() = runBlocking {
-        // Andrés Rodríguez ("28491023") aún no tiene beneficio entregado
-        val resp = fakeApi.registrarEscaneo(RegistrarEscaneoRequest(
-            beneficioId = "ben-001-kit",
-            participanteId = "28491023"
-        ))
-
-        assertFalse(resp.yaEntregadoPreviamente)
-        assertEquals("Andrés Rodríguez", resp.participanteNombreCompleto)
-        assertEquals("28491023", resp.participanteId)
-    }
-
-    @Test
-    fun testScan_participanteValidoPorCorreo_retornaValido() = runBlocking {
-        // Búsqueda por correo "andres.rodriguez@zendov.com"
-        val resp = fakeApi.registrarEscaneo(RegistrarEscaneoRequest(
-            beneficioId = "ben-001-kit",
-            participanteId = "andres.rodriguez@zendov.com"
-        ))
-
-        assertEquals("Andrés Rodríguez", resp.participanteNombreCompleto)
-        assertEquals("28491023", resp.participanteId)
-    }
-
-    @Test
-    fun testScan_participanteYaEscaneado_retornaYaEntregadoPreviamente() = runBlocking {
-        // María Camila Pérez ("10482914") ya tenía beneficio entregado previamente
-        val resp = fakeApi.registrarEscaneo(RegistrarEscaneoRequest(
-            beneficioId = "ben-001-kit",
-            participanteId = "10482914"
-        ))
-
-        assertTrue(resp.yaEntregadoPreviamente)
-        assertEquals("María Camila Pérez", resp.participanteNombreCompleto)
-        assertTrue(resp.mensaje.contains("YA FUE ENTREGADO"))
-    }
-
-    @Test
-    fun testScan_dobleEscaneoConsecutivo_primerExitoSegundoYaEscaneado() = runBlocking {
-        val idValeria = "30192841"
-
-        // 1er Escaneo: Éxito
-        val resp1 = fakeApi.registrarEscaneo(RegistrarEscaneoRequest(
-            beneficioId = "ben-001-kit",
-            participanteId = idValeria
-        ))
-        assertFalse("Primer escaneo debe ser nuevo", resp1.yaEntregadoPreviamente)
-
-        // 2do Escaneo: Ya escaneado
-        val resp2 = fakeApi.registrarEscaneo(RegistrarEscaneoRequest(
-            beneficioId = "ben-001-kit",
-            participanteId = idValeria
-        ))
-        assertTrue("Segundo escaneo debe detectar duplicado", resp2.yaEntregadoPreviamente)
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECCIÓN 4: PERSISTENCIA ROOM Y MODO OFFLINE
-    // ═════════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun testOffline_escaneoLocal_persisteConPendienteSubida() = runBlocking {
-        val timestamp = System.currentTimeMillis()
-        fakeDao.marcarEscaneoLocal("28491023", timestamp)
-
-        val participante = fakeDao.buscarParticipante("28491023")
-        assertNotNull(participante)
-        assertTrue(participante!!.beneficioEntregado)
-        assertTrue(participante.pendienteSubida)
-        assertFalse(participante.sincronizadoConBackend)
-        assertEquals(timestamp, participante.timestampEscaneo)
-
-        // Verificar que aparece en lista de pendientes
-        val pendientes = fakeDao.obtenerPendientesSync()
-        assertEquals(1, pendientes.size)
-        assertEquals("28491023", pendientes[0].idParticipante)
-    }
-
-    @Test
-    fun testOffline_escaneoConAuditoriaCompleta_persisteStaffYDispositivo() = runBlocking {
-        val timestamp = System.currentTimeMillis()
-        fakeDao.marcarEscaneoLocalConAuditoria(
-            id = "28491023",
-            timestamp = timestamp,
-            staffId = "STF-025",
-            staffNombre = "Luis Mendoza",
-            deviceId = "device_Pixel_8",
-            beneficioId = "ben-001-kit"
+    fun inicializarEvento_limpiaSincronizadosDeOtroEventoPeroConservaPendientesAjenos() = runBlocking {
+        // Escaneo pendiente de staff-A en evt-1
+        repository.registrarEscaneo(partId1, benId1)
+        // Otro participante ya sincronizado en evt-1
+        val partSyncId = UUID.randomUUID().toString()
+        fakeDao.insertarParticipantes(
+            listOf(ParticipanteEntity(partSyncId, "Sync User", eventoId = "evt-1"))
+        )
+        fakeDao.upsertEscaneo(
+            EscaneoEntity(
+                participanteId = partSyncId,
+                beneficioId = benId1,
+                eventoId = "evt-1",
+                entregado = true,
+                sincronizadoConBackend = true,
+                pendienteSubida = false
+            )
         )
 
-        val p = fakeDao.buscarParticipante("28491023")
-        assertNotNull(p)
-        assertTrue(p!!.beneficioEntregado)
-        assertEquals("STF-025", p.scannedByStaffId)
-        assertEquals("Luis Mendoza", p.scannedByStaffNombre)
-        assertEquals("device_Pixel_8", p.scannedByDeviceId)
-        assertEquals("ben-001-kit", p.beneficioId)
-    }
+        // Entra staff-B en evt-2
+        currentSession = ParticipanteRepository.SessionInfo("evt-2", "staff-B", "Ana Torres")
+        repository.inicializarEvento("evt-2")
 
-
-    @Test
-    fun testOffline_syncUpload_confirmaYDespejaPendientes() = runBlocking {
-        // 1. Escaneo offline
-        fakeDao.marcarEscaneoLocal("28491023", System.currentTimeMillis())
-
-        // 2. Subida al backend
-        val pendientes = fakeDao.obtenerPendientesSync()
-        val uploadReq = SyncUploadRequest(pendientes.map { EscaneoRequest(it.idParticipante, it.timestampEscaneo ?: 0L) })
-        val uploadResp = fakeApi.subirEscaneos(uploadReq)
-
-        assertEquals(1, uploadResp.confirmados)
-        assertEquals(0, uploadResp.rechazados)
-
-        // 3. Confirmar en Room
-        val confirmadosIds = uploadResp.resultados.filter { it.validado }.map { it.idParticipante }
-        fakeDao.marcarLoteComoSincronizado(confirmadosIds)
-
-        // 4. Verificar que pendientes ahora está vacío
-        val pendientesDespues = fakeDao.obtenerPendientesSync()
-        assertEquals(0, pendientesDespues.size)
-
-        val p = fakeDao.buscarParticipante("28491023")
-        assertTrue(p!!.sincronizadoConBackend)
-        assertFalse(p.pendienteSubida)
+        // El participante sincronizado de evt-1 fue borrado
+        assertNull(fakeDao.buscarParticipante(partSyncId))
+        assertNull(fakeDao.obtenerEscaneo(partSyncId, benId1))
+        // El participante y escaneo pendiente de staff-A en evt-1 se conservan
+        assertNotNull(fakeDao.buscarParticipante(partId1))
+        assertNotNull(fakeDao.obtenerEscaneo(partId1, benId1))
     }
 
     @Test
-    fun testOffline_busquedaMultiColumna_funcionaPorDniYCorreo() = runBlocking {
-        // Búsqueda por documento exacto
-        val porDni = fakeDao.buscarParticipante("10482914")
-        assertNotNull(porDni)
-        assertEquals("María Camila Pérez", porDni!!.nombre)
+    fun descargarSoloCambios_paginadoGuardaCursorDePagina0YAplicaBeneficiosEstadoSinPisarPendientes() = runBlocking {
+        // Escaneo local pendiente para benId1
+        repository.registrarEscaneo(partId1, benId1)
 
-        // Búsqueda por correo case-insensitive
-        val porCorreo = fakeDao.buscarParticipante("MARIA.PEREZ@ZENDOV.COM")
-        assertNotNull(porCorreo)
-        assertEquals("María Camila Pérez", porCorreo!!.nombre)
+        val partId2 = UUID.randomUUID().toString()
+        val partEliminado = UUID.randomUUID().toString()
+        fakeDao.insertarParticipantes(
+            listOf(ParticipanteEntity(partEliminado, "Por Eliminar", eventoId = "evt-1"))
+        )
 
-        // Búsqueda de asistente inexistente
-        val inexistente = fakeDao.buscarParticipante("nadie@empresa.com")
-        assertNull(inexistente)
-    }
-
-    // ── Métodos utilitarios helper que replican la lógica del repositorio ─────
-    private fun extraerValorQrMock(raw: String): String {
-        val limpio = raw.trim()
-        if (limpio.isEmpty()) return ""
-
-        if (limpio.startsWith("{") && limpio.endsWith("}")) {
-            val idMatch = """"id"\s*:\s*"([^"]+)"""".toRegex().find(limpio)?.groupValues?.get(1)
-            if (!idMatch.isNullOrBlank()) return idMatch
-            val docMatch = """"documento"\s*:\s*"([^"]+)"""".toRegex().find(limpio)?.groupValues?.get(1)
-            if (!docMatch.isNullOrBlank()) return docMatch
-            val correoMatch = """"correo"\s*:\s*"([^"]+)"""".toRegex().find(limpio)?.groupValues?.get(1)
-            if (!correoMatch.isNullOrBlank()) return correoMatch
-        }
-
-        if (limpio.startsWith("http://") || limpio.startsWith("https://")) {
-            val codeParam = "[?&]code=([^&]+)".toRegex().find(limpio)?.groupValues?.get(1)
-            if (!codeParam.isNullOrBlank()) return codeParam
-            val lastSlash = limpio.lastIndexOf('/')
-            if (lastSlash != -1 && lastSlash < limpio.length - 1) {
-                val segment = limpio.substring(lastSlash + 1)
-                if (!segment.contains("?")) return segment
+        val paginasLlamadas = mutableListOf<Pair<Long?, Int?>>()
+        fakeApi.downloadHandler = { _, since, page, _ ->
+            paginasLlamadas.add(since to page)
+            when (page) {
+                0 -> SyncDownloadResponse(
+                    participantes = listOf(
+                        ParticipanteSyncDto(
+                            idParticipante = partId1,
+                            nombre = "María Camila Pérez",
+                            beneficiosEstado = listOf(
+                                // El servidor aún dice entregado=false para benId1, pero está pendiente local -> NO pisar
+                                BeneficioEstadoDto(beneficioId = benId1, entregado = false),
+                                // Otro dispositivo entregó benId2 -> debe guardarse en Room
+                                BeneficioEstadoDto(
+                                    beneficioId = benId2,
+                                    entregado = true,
+                                    timestampEscaneo = 1_700_000_123_000L,
+                                    staffNombre = "Otro Staff"
+                                )
+                            )
+                        )
+                    ),
+                    totalEscaneados = 1,
+                    timestampServidor = 1_700_000_500_000L,
+                    page = 0,
+                    size = 500,
+                    hasMore = true
+                )
+                else -> SyncDownloadResponse(
+                    participantes = listOf(
+                        ParticipanteSyncDto(idParticipante = partId2, nombre = "Nuevo Asistente"),
+                        ParticipanteSyncDto(idParticipante = partEliminado, nombre = "Por Eliminar", eliminado = true)
+                    ),
+                    totalEscaneados = 0,
+                    timestampServidor = 1_700_000_505_000L,
+                    page = 1,
+                    size = 500,
+                    hasMore = false
+                )
             }
         }
 
-        return limpio
-    }
+        val res = repository.descargarSoloCambios("evt-1")
+        assertTrue(res.isSuccess)
+        assertEquals(3, res.getOrThrow())
+        assertEquals(listOf(null to 0, null to 1), paginasLlamadas)
 
-    private fun esFormatoQrValidoMock(valor: String): Boolean {
-        if (valor.isBlank() || valor.length > 100) return false
-        if (valor.contains(" ") || valor.contains("\n") || valor.contains("\r") || valor.contains("\t")) return false
+        // Cursor guardado es el de page 0 (inicio de la consulta del servidor)
+        assertEquals("1700000500000", fakeDao.obtenerMeta("ultimo_delta_timestamp_evt-1"))
 
-        if (valor.contains("@")) {
-            val emailRegex = "^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$".toRegex()
-            return emailRegex.matches(valor)
+        // benId1 sigue pendiente local (no fue borrado ni pisado)
+        val esc1 = fakeDao.obtenerEscaneo(partId1, benId1)!!
+        assertTrue(esc1.pendienteSubida)
+        assertTrue(esc1.entregado)
+
+        // benId2 entregado por otro dispositivo ahora existe en Room
+        val esc2 = fakeDao.obtenerEscaneo(partId1, benId2)!!
+        assertTrue(esc2.entregado)
+        assertTrue(esc2.sincronizadoConBackend)
+        assertEquals("Otro Staff", esc2.scannedByStaffNombre)
+
+        // Tombstone eliminado y nuevo asistente insertado
+        assertNotNull(fakeDao.buscarParticipante(partId2))
+        assertNull(fakeDao.buscarParticipante(partEliminado))
+
+        // Siguiente llamada usa el cursor guardado como since
+        paginasLlamadas.clear()
+        fakeApi.downloadHandler = { _, since, page, _ ->
+            paginasLlamadas.add(since to page)
+            SyncDownloadResponse(emptyList(), 0, 1_700_000_600_000L, delta = true, hasMore = false)
         }
-
-        val idRegex = "^[A-Za-z0-9\\-_]+$".toRegex()
-        return idRegex.matches(valor)
+        val resDelta = repository.descargarSoloCambios("evt-1")
+        assertTrue(resDelta.isSuccess)
+        assertEquals(listOf(1_700_000_500_000L to 0), paginasLlamadas)
+        assertEquals("1700000600000", fakeDao.obtenerMeta("ultimo_delta_timestamp_evt-1"))
     }
 }

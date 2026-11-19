@@ -117,28 +117,9 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 _loginState.value = LoginUiState.ErrorCredenciales(errorMsg)
 
             } catch (e: IOException) {
-                // Servidor backend offline: solo permitir el login hardcodeado si las credenciales coinciden exactamente
-                if (dniLimpio == "12345678" && pinLimpio == "654321") {
-                    val staffDev = StaffDataDto(
-                        staffId = "STF-025",
-                        nombreCompleto = "Luis Mendoza",
-                        documentoIdentidad = "12345678",
-                        rol = "Coordinador de accesos",
-                        cargo = "Coordinador de accesos",
-                        evento = EventoStaffDto(
-                            eventoId = "EVT-025",
-                            nombre = "Zendov Tech Summit 2025",
-                            slug = "zendov-summit-2025",
-                            tenantId = "tenant_zendov_2025"
-                        )
-                    )
-                    val tokenDev = "eyJhbGciOiJIUzI1NiJ9.demo-offline"
-                    sessionManager.guardarSesion(tokenDev, staffDev)
-                    _staffActual.value = staffDev
-                    _loginState.value  = LoginUiState.Autenticado(staffDev)
-                } else {
-                    _loginState.value = LoginUiState.ErrorCredenciales("No fue posible validar tus credenciales en el servidor (api-eventos.zendov.com).")
-                }
+                _loginState.value = LoginUiState.ErrorCredenciales(
+                    "No se pudo conectar con el servidor. Verifica tu conexión a internet e intenta nuevamente."
+                )
 
             } catch (e: Exception) {
                 _loginState.value = LoginUiState.ErrorCredenciales("Error inesperado: ${e.localizedMessage}")

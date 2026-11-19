@@ -108,6 +108,10 @@ fun AppNavigation() {
 
     val staffActual by authViewModel.staffActual.collectAsState()
 
+    LaunchedEffect(staffActual?.evento?.eventoId) {
+        staffActual?.evento?.eventoId?.let { eventoViewModel.inicializarEvento(it) }
+    }
+
     Scaffold(
         containerColor = ColorBackground,
         bottomBar = {

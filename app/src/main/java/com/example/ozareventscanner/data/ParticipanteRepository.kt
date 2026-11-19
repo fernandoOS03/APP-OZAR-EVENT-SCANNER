@@ -3,462 +3,703 @@ package com.example.ozareventscanner.data
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import androidx.work.*
-import com.example.ozareventscanner.network.*
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.map
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import com.example.ozareventscanner.network.ApiService
+import com.example.ozareventscanner.network.BeneficioActivoDto
+import com.example.ozareventscanner.network.EscaneoConfirmado
+import com.example.ozareventscanner.network.EscaneoRequest
+import com.example.ozareventscanner.network.SyncUploadRequest
 import com.example.ozareventscanner.sync.SyncWorker
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tipos de resultado
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Resultado de un intento de escaneo QR.
- * El ViewModel mapea esto a [ScanUiState] para la UI.
- */
 sealed class ScanResultado {
-    /** El QR no tiene el formato esperado (no es un ID de participante). */
     object FormatoInvalido : ScanResultado()
-
-    /** El ID del QR no existe en la base de datos local. */
     object NoEncontrado : ScanResultado()
 
-    /** El participante ya tenía su beneficio entregado. */
     data class YaEscaneado(
         val nombre: String,
         val mensaje: String = "",
         val fecha: String? = null,
-        val staff: String? = null
+        val staff: String? = null,
+        val entidad: ParticipanteEntity? = null
     ) : ScanResultado()
 
-    /** Escaneo registrado exitosamente. Beneficio marcado como entregado. */
     data class Valido(
         val nombre: String,
         val beneficio: String = "",
         val fecha: String? = null,
-        val staff: String? = null
+        val staff: String? = null,
+        val pendienteSync: Boolean = true,
+        val entidad: ParticipanteEntity? = null
     ) : ScanResultado()
 
-    /** Error inesperado durante el procesamiento. */
     data class Error(val mensaje: String) : ScanResultado()
 }
 
-/** Estadísticas de una operación de sincronización completa. */
-data class SyncStats(
-    val subidos: Int     = 0,
-    val descargados: Int = 0,
-    val rechazados: Int  = 0
+data class UploadStats(
+    val subidos: Int = 0,
+    val conflictos: Int = 0,
+    val rechazados: Int = 0
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Repositorio
-// ─────────────────────────────────────────────────────────────────────────────
+data class SyncStats(
+    val subidos: Int = 0,
+    val descargados: Int = 0,
+    val rechazados: Int = 0,
+    val conflictos: Int = 0
+)
 
-/**
- * Repositorio central de datos — única fuente de verdad (Single Source of Truth).
- *
- * Orquesta:
- *  - Acceso local a Room ([ParticipanteDao]).
- *  - Llamadas de red al backend ([ApiService]).
- *  - Sincronización en segundo plano (WorkManager).
- *
- * ## Estrategia offline-first
- *
- * Cada escaneo QR se persiste inmediatamente en Room con timestamp.
- * Si hay conectividad → sincronización inmediata (upload + download).
- * Si no hay red → WorkManager encola la sincronización hasta recuperar conexión.
- *
- * ## Resolución de conflictos
- *
- * Doble escaneo desde dos dispositivos offline:
- *  1. Ambos suben su escaneo al backend con su respectivo timestamp.
- *  2. El backend acepta el de menor timestamp (el más antiguo = el primero).
- *  3. El dispositivo perdedor recibe `validado: false` y revierte localmente.
- */
+data class ParticipanteConBeneficios(
+    val participante: ParticipanteEntity,
+    val escaneos: Map<String, EscaneoEntity>
+) {
+    val idParticipante: String get() = participante.idParticipante
+    val nombre: String get() = participante.nombre
+    val documento: String? get() = participante.documento
+    val correo: String? get() = participante.correo
+
+    val beneficiosEntregados: Set<String>
+        get() = escaneos.values
+            .filter { it.entregado && it.syncError == null }
+            .map { it.beneficioId }
+            .toSet()
+
+    val beneficioEntregado: Boolean get() = beneficiosEntregados.isNotEmpty()
+    val tienePendientesSync: Boolean get() = escaneos.values.any { it.pendienteSubida }
+    val tieneErroresSync: Boolean get() = escaneos.values.any { it.syncError != null }
+    val tieneConflictos: Boolean get() = escaneos.values.any { it.conflicto }
+}
+
 class ParticipanteRepository(
     private val dao: ParticipanteDao,
     private val apiService: ApiService,
-    private val context: Context
+    private val context: Context?,
+    private val sessionProvider: (() -> SessionInfo?)? = null,
+    private val deviceIdProvider: (() -> String)? = null,
+    private val connectivityChecker: (() -> Boolean)? = null,
+    private val uploadScheduler: (() -> Unit)? = null
 ) {
 
-    // ─────────────────────────────────────────────────────────────────────────
+    data class SessionInfo(
+        val eventoId: String?,
+        val staffId: String?,
+        val staffNombre: String?
+    )
+
+    private val syncMutex = Mutex()
+
+    private val sessionManager: SessionManager?
+        get() = context?.let { SessionManager.getInstance(it) }
+
+    private fun obtenerSesionActual(): SessionInfo? {
+        sessionProvider?.let { return it() }
+        val sm = sessionManager ?: return null
+        val staff = sm.obtenerStaff() ?: return null
+        return SessionInfo(
+            eventoId = staff.evento.eventoId,
+            staffId = staff.staffId,
+            staffNombre = staff.nombreCompleto
+        )
+    }
+
+    private val deviceId: String
+        get() = deviceIdProvider?.invoke()
+            ?: sessionManager?.obtenerDeviceId()
+            ?: "device_unknown"
+
     // ─────────────────────────────────────────────────────────────────────────
     // Validación y extracción de formato QR
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Extrae el código, documento o correo útil a partir de un valor raw de QR.
-     * Soporta valores raw planos, JSON payloads ({ "id": ... }) y URLs de acreditación.
-     */
     fun extraerValorQr(raw: String): String {
         val limpio = raw.trim()
         if (limpio.isEmpty()) return ""
 
-        // Si viene estructurado como JSON: {"id": "10482914"} o {"documento": ...} o {"correo": ...}
         if (limpio.startsWith("{") && limpio.endsWith("}")) {
             try {
                 val json = org.json.JSONObject(limpio)
                 val extraido = json.optString("id")
                     .ifBlank { json.optString("participanteId") }
-                    .ifBlank { json.optString("documento") }
-                    .ifBlank { json.optString("correo") }
-                    .ifBlank { json.optString("email") }
                     .ifBlank { json.optString("code") }
-                if (extraido.isNotBlank()) return extraido
+                if (extraido.isNotBlank()) return extraido.trim()
             } catch (_: Exception) {}
         }
 
-        // Si viene como URL: https://api-eventos.zendov.com/ticket?code=10482914
         if (limpio.startsWith("http://") || limpio.startsWith("https://")) {
             try {
                 val uri = android.net.Uri.parse(limpio)
                 val codeParam = uri.getQueryParameter("code")
                     ?: uri.getQueryParameter("id")
-                    ?: uri.getQueryParameter("documento")
-                    ?: uri.getQueryParameter("correo")
-                if (!codeParam.isNullOrBlank()) return codeParam
+                    ?: uri.getQueryParameter("participanteId")
+                if (!codeParam.isNullOrBlank()) return codeParam.trim()
                 val lastSegment = uri.lastPathSegment
-                if (!lastSegment.isNullOrBlank()) return lastSegment
+                if (!lastSegment.isNullOrBlank()) return lastSegment.trim()
             } catch (_: Exception) {}
         }
 
         return limpio
     }
 
-    /**
-     * Valida sintácticamente que el identificador, correo o documento sea admisible.
-     * Reglas estrictas:
-     *  - Si contiene '@', debe cumplir el formato estricto de email RFC 5322.
-     *  - No debe contener espacios en blanco.
-     *  - Debe tener entre 1 y 100 caracteres.
-     *  - Si no es correo, debe ser alfanumérico (letras, dígitos, guiones o guiones bajos).
-     */
-    fun esFormatoQrValido(valor: String): Boolean {
-        if (valor.isBlank() || valor.length > 100) return false
-        if (valor.contains(" ") || valor.contains("\n") || valor.contains("\r") || valor.contains("\t")) return false
+    fun esFormatoQrValido(valor: String): Boolean = normalizarUuid(valor) != null
 
-        // Si parece un correo electrónico (contiene '@')
-        if (valor.contains("@")) {
-            val emailRegex = "^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$".toRegex()
-            return emailRegex.matches(valor)
+    private fun normalizarUuid(valor: String): String? {
+        val limpio = extraerValorQr(valor)
+        if (limpio.isBlank()) return null
+        return try {
+            UUID.fromString(limpio).toString()
+        } catch (_: IllegalArgumentException) {
+            null
         }
+    }
 
-        // Código o Documento: alfanumérico con guiones o guiones bajos
-        val idRegex = "^[A-Za-z0-9\\-_]+$".toRegex()
-        return idRegex.matches(valor)
+    private fun fechaLegible(timestamp: Long?): String? {
+        if (timestamp == null) return null
+        return SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", Locale.getDefault())
+            .format(Date(timestamp))
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Escaneo QR — flujo principal
+    // Escaneo QR — flujo principal (Offline-first)
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Registra un escaneo QR aplicando arquitectura Single Source of Truth (SSOT) Offline-First estricta:
-     *  1. Valida sintácticamente el código.
-     *  2. Valida contra Room de manera inmediata (< 10 ms).
-     *  3. Si es válido, persiste en Room con timestamp y datos de auditoría (pendiente de subida).
-     *  4. Encola sincronización en segundo plano con WorkManager (sin bloquear el hilo de la cámara).
-     *  5. Retorna inmediatamente el resultado para respuesta instantánea de la UI.
-     */
-    suspend fun registrarEscaneo(rawQrValue: String, beneficioId: String = ""): ScanResultado {
-        val qrLimpio = extraerValorQr(rawQrValue)
-        if (!esFormatoQrValido(qrLimpio)) {
-            return ScanResultado.FormatoInvalido
+    suspend fun registrarEscaneo(rawQrValue: String, beneficioId: String): ScanResultado {
+        val participanteId = normalizarUuid(rawQrValue) ?: return ScanResultado.FormatoInvalido
+        val beneficioUuid = try {
+            UUID.fromString(beneficioId.trim()).toString()
+        } catch (_: IllegalArgumentException) {
+            return ScanResultado.Error("Selecciona un beneficio válido antes de escanear.")
         }
 
         return try {
-            asegurarDatosMockIniciales()
-            val participante = dao.buscarParticipante(qrLimpio)
+            val participante = dao.buscarParticipante(participanteId)
                 ?: return ScanResultado.NoEncontrado
+            val beneficio = dao.obtenerBeneficioPorId(beneficioUuid)
+                ?: return ScanResultado.Error("El beneficio seleccionado ya no está disponible.")
 
-            if (participante.beneficioEntregado) {
-                val fecha = participante.timestampEscaneo?.let {
-                    java.text.SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(it))
-                }
-                val staffNombre = participante.scannedByStaffNombre ?: "Operador de acreditaciones"
+            val existente = dao.obtenerEscaneo(participanteId, beneficioUuid)
+            if (existente != null && existente.entregado && existente.syncError == null) {
                 return ScanResultado.YaEscaneado(
-                    nombre  = participante.nombre,
+                    nombre = participante.nombre,
                     mensaje = "Este beneficio ya fue reclamado y validado en el sistema.",
-                    fecha   = fecha,
-                    staff   = staffNombre
+                    fecha = fechaLegible(existente.timestampEscaneo),
+                    staff = existente.scannedByStaffNombre ?: "Operador de acreditaciones",
+                    entidad = participante
+                )
+            }
+
+            if (existente?.syncError != null) {
+                return ScanResultado.Error(
+                    "Este escaneo fue rechazado por el servidor: ${existente.syncError}"
                 )
             }
 
             val timestamp = System.currentTimeMillis()
-            val session = SessionManager.getInstance(context).obtenerStaff()
-            val staffId = session?.staffId
-            val staffNombre = session?.nombreCompleto ?: "Staff Acreditación"
-            val deviceId = "device_${android.os.Build.MODEL.replace(" ", "_")}"
+            val sesion = obtenerSesionActual()
+            val staffNombre = sesion?.staffNombre ?: "Staff Acreditación"
+            val eventoId = sesion?.eventoId ?: beneficio.eventoId.orEmpty()
 
-            dao.marcarEscaneoLocalConAuditoria(
-                id          = participante.idParticipante,
-                timestamp   = timestamp,
-                staffId     = staffId,
-                staffNombre = staffNombre,
-                deviceId    = deviceId,
-                beneficioId = if (beneficioId.isNotBlank()) beneficioId else participante.beneficioId
+            dao.upsertEscaneo(
+                EscaneoEntity(
+                    participanteId = participanteId,
+                    beneficioId = beneficioUuid,
+                    eventoId = eventoId,
+                    entregado = true,
+                    timestampEscaneo = timestamp,
+                    sincronizadoConBackend = false,
+                    pendienteSubida = true,
+                    scannedByStaffId = sesion?.staffId,
+                    scannedByStaffNombre = staffNombre,
+                    scannedByDeviceId = deviceId,
+                    syncError = null,
+                    conflicto = false
+                )
             )
 
-            // Disparar sincronización resiliente en segundo plano (no bloquea UI)
-            if (hayConexion()) {
-                programarSyncUnica()
-            } else {
-                programarSyncUnica()
-            }
+            programarSyncUnica()
 
             ScanResultado.Valido(
-                nombre    = participante.nombre,
-                beneficio = if (beneficioId.isNotBlank()) beneficioId else "Beneficio Acreditado",
-                fecha     = java.text.SimpleDateFormat("dd/MM/yyyy · HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(timestamp)),
-                staff     = staffNombre
+                nombre = participante.nombre,
+                beneficio = beneficio.nombre,
+                fecha = fechaLegible(timestamp),
+                staff = staffNombre,
+                pendienteSync = true,
+                entidad = participante
             )
-
         } catch (e: Exception) {
             ScanResultado.Error("Error al procesar escaneo: ${e.localizedMessage}")
         }
     }
 
+    suspend fun obtenerBeneficiosActivos(eventoId: String): List<BeneficioEntity> {
+        val locales = dao.obtenerBeneficiosActivos()
+        if (locales.isNotEmpty()) return locales
 
-    /**
-     * Obtiene los beneficios activos para el evento especificado.
-     */
-    suspend fun obtenerBeneficiosActivos(eventoId: String): List<BeneficioActivoDto> {
-        return apiService.obtenerBeneficiosActivos(eventoId)
+        if (!hayConexion()) return emptyList()
+
+        return runCatching {
+            val remotos = apiService.obtenerBeneficiosActivos(eventoId)
+            dao.insertarBeneficios(remotos.map { it.toEntity(eventoId) })
+            dao.obtenerBeneficiosActivos()
+        }.getOrDefault(emptyList())
     }
 
+    fun observarBeneficiosActivos(): Flow<List<BeneficioEntity>> = dao.observarBeneficiosActivos()
+
     // ─────────────────────────────────────────────────────────────────────────
-    // Contingencia: Búsqueda y Entrega Manual de Beneficio + Mock Data
+    // Contingencia: búsqueda y entrega manual
     // ─────────────────────────────────────────────────────────────────────────
 
-    private suspend fun asegurarDatosMockIniciales() {
-        try {
-            val total = dao.contarTotalParticipantes()
-            if (total == 0) {
-                dao.insertarParticipantes(MOCK_PARTICIPANTES)
-            } else {
-                val maria = dao.buscarParticipante("10482914")
-                if (maria == null) {
-                    dao.insertarParticipantes(MOCK_PARTICIPANTES)
-                }
-            }
-        } catch (e: Exception) {
-            // Silencioso si ya existen
-        }
-    }
-
-    /** Obtiene todos los participantes o filtra por nombre/DNI. */
-    suspend fun buscarParticipantes(query: String = ""): List<ParticipanteEntity> {
-        asegurarDatosMockIniciales()
+    suspend fun buscarParticipantes(query: String = ""): List<ParticipanteConBeneficios> {
         val queryLimpia = query.trim()
-        return if (queryLimpia.isBlank()) {
+        val participantes = if (queryLimpia.isBlank()) {
             dao.obtenerTodos()
         } else {
             dao.buscarPorNombreOId(queryLimpia)
         }
-    }
-
-    /** Observa el conteo total de asistentes registrados. */
-    fun observarTotalParticipantes(): kotlinx.coroutines.flow.Flow<Int> = dao.observarTotalParticipantes()
-
-    /** Cuenta el total de asistentes registrados actualmente. */
-    suspend fun contarTotalParticipantes(): Int {
-        asegurarDatosMockIniciales()
-        return dao.contarTotalParticipantes()
-    }
-
-    /** Busca un participante por su ID específico. */
-    suspend fun buscarParticipantePorId(id: String): ParticipanteEntity? {
-        asegurarDatosMockIniciales()
-        return dao.buscarParticipante(id.trim())
-    }
-
-    /**
-     * Entrega manualmente el beneficio a un participante (contingencia por QR dañado).
-     * Aplica la misma persistencia con timestamp y sincronización diferida/inmediata.
-     */
-    suspend fun entregarBeneficioManual(idParticipante: String): ScanResultado {
-        return try {
-            val participante = dao.buscarParticipante(idParticipante)
-                ?: return ScanResultado.NoEncontrado
-
-            if (participante.beneficioEntregado) {
-                return ScanResultado.YaEscaneado(participante.nombre)
-            }
-
-            val timestamp = System.currentTimeMillis()
-            dao.marcarEscaneoLocal(idParticipante, timestamp)
-
-            if (hayConexion()) {
-                sincronizarCompleto()
-            } else {
-                programarSyncUnica()
-            }
-
-            ScanResultado.Valido(participante.nombre)
-        } catch (e: Exception) {
-            ScanResultado.Error("Error al entregar beneficio manual: ${e.localizedMessage}")
-        }
-    }
-
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Sincronización completa (upload → download)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * Sincronización bidireccional completa.
-     *
-     * Fase 1 — Upload:
-     *   - Obtiene todos los registros con `pendienteSubida = true`.
-     *   - POST /sync/upload con IDs y timestamps.
-     *   - Backend confirma (gana el menor timestamp) o rechaza (conflicto).
-     *   - Confirmados: marca `sincronizadoConBackend = true`.
-     *   - Rechazados:  revierte `beneficioEntregado = false` (otro dispositivo fue primero).
-     *
-     * Fase 2 — Download:
-     *   - GET /sync/download → estado canónico del servidor.
-     *   - REPLACE en Room con los datos del servidor.
-     *
-     * @return [Result<SyncStats>] con estadísticas o excepción en caso de fallo de red.
-     */
-    suspend fun sincronizarCompleto(): Result<SyncStats> = runCatching {
-        val statsUpload   = subirPendientes()
-        val countDownload = descargarYActualizar()
-        SyncStats(
-            subidos     = statsUpload.first,
-            rechazados  = statsUpload.second,
-            descargados = countDownload
-        )
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Upload (privado)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /** @return Par (confirmados, rechazados). */
-    private suspend fun subirPendientes(): Pair<Int, Int> {
-        val pendientes = dao.obtenerPendientesSync()
-        if (pendientes.isEmpty()) return Pair(0, 0)
-
-        val deviceId = "device_${android.os.Build.MODEL.replace(" ", "_")}"
-        val request = SyncUploadRequest(
-            escaneos = pendientes.map { p ->
-                EscaneoRequest(
-                    idParticipante   = p.idParticipante,
-                    timestampEscaneo = p.timestampEscaneo ?: System.currentTimeMillis(),
-                    beneficioId      = p.beneficioId,
-                    staffId          = p.scannedByStaffId,
-                    deviceId         = p.scannedByDeviceId ?: deviceId
-                )
-            },
-            deviceId = deviceId
-        )
-
-        val response = apiService.subirEscaneos(request)
-
-
-        val idsConfirmados = if (response.resultados.isEmpty()) {
-            // Si el backend (o mock) no devuelve detalle por item, confirmamos todo el lote enviado
-            request.escaneos.map { it.idParticipante }
-        } else {
-            response.resultados
-                .filter  { it.validado }
-                .map     { it.idParticipante }
-        }
-
-        val idsRechazados = response.resultados
-            .filter  { !it.validado }
-            .map     { it.idParticipante }
-
-        if (idsConfirmados.isNotEmpty()) {
-            dao.marcarLoteComoSincronizado(idsConfirmados)
-        }
-        idsRechazados.forEach { id ->
-            dao.revertirEscaneoRechazado(id)
-        }
-
-        return Pair(idsConfirmados.size, idsRechazados.size)
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Download (privado)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * Descarga el estado canónico del servidor y reemplaza Room.
-     * @return Número de participantes procesados.
-     */
-    private suspend fun descargarYActualizar(): Int {
-        val response = apiService.descargarEstado()
-
-        if (response.participantes.isEmpty()) return 0
-
-        val entities = response.participantes.map { dto ->
-            ParticipanteEntity(
-                idParticipante         = dto.idParticipante,
-                nombre                 = dto.nombre,
-                beneficioEntregado     = dto.beneficioEntregado,
-                timestampEscaneo       = dto.timestampEscaneo,
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = dto.documento ?: dto.idParticipante,
-                correo                 = dto.correo
+        val escaneosPorParticipante = dao.obtenerTodosEscaneos().groupBy { it.participanteId }
+        return participantes.map { p ->
+            ParticipanteConBeneficios(
+                participante = p,
+                escaneos = escaneosPorParticipante[p.idParticipante]
+                    .orEmpty()
+                    .associateBy { it.beneficioId }
             )
         }
-
-        dao.sincronizarDesdeBackend(entities)
-        return entities.size
     }
 
+    fun paginarParticipantes(query: String): Flow<PagingData<ParticipanteConBeneficios>> {
+        val queryLimpia = query.trim()
+        return Pager(
+            config = PagingConfig(
+                pageSize = 40,
+                prefetchDistance = 15,
+                enablePlaceholders = false
+            ),
+            pagingSourceFactory = {
+                if (queryLimpia.isBlank()) {
+                    dao.pagingTodos()
+                } else {
+                    dao.pagingBuscarPorPrefijo(queryLimpia)
+                }
+            }
+        ).flow.map { pagingData ->
+            pagingData.map { relation -> relation.toParticipanteConBeneficios() }
+        }
+    }
+
+    fun observarConteoPorBeneficio(): Flow<Map<String, Int>> =
+        dao.observarConteoPorBeneficio().map { lista ->
+            lista.associate { it.beneficioId to it.total }
+        }
+
+    fun observarTotalParticipantesEscaneados(): Flow<Int> =
+        dao.observarTotalParticipantesEscaneados()
+
+    fun observarEscaneosEntregados(): Flow<List<EscaneoEntity>> =
+        dao.observarEscaneosEntregados()
+
+    fun observarTotalParticipantes(): Flow<Int> = dao.observarTotalParticipantes()
+
+    fun observarPendientesSync(): Flow<Int> = dao.observarPendientesSync()
+
+    fun observarPendientesSyncDeSesion(eventoId: String, staffId: String?): Flow<Int> =
+        dao.observarPendientesSyncDeSesion(eventoId, staffId)
+
+    fun observarPendientesOtrosUsuarios(eventoId: String, staffId: String?): Flow<Int> =
+        dao.observarPendientesOtrosUsuarios(eventoId, staffId)
+
+    fun observarConflictosCount(eventoId: String): Flow<Int> =
+        dao.observarConflictosCount(eventoId)
+
+    suspend fun obtenerConflictos(eventoId: String): List<EscaneoEntity> =
+        dao.obtenerConflictos(eventoId)
+
+    fun obtenerEventoIdActual(): String? = obtenerSesionActual()?.eventoId
+
+    fun obtenerStaffIdActual(): String? = obtenerSesionActual()?.staffId
+
+    suspend fun contarTotalParticipantes(): Int = dao.contarTotalParticipantes()
+
+    suspend fun buscarParticipantePorId(id: String): ParticipanteEntity? {
+        val limpio = normalizarUuid(id) ?: extraerValorQr(id)
+        return dao.buscarParticipante(limpio)
+    }
+
+    suspend fun entregarBeneficioManual(
+        idParticipante: String,
+        beneficioId: String
+    ): ScanResultado = registrarEscaneo(idParticipante, beneficioId)
+
     // ─────────────────────────────────────────────────────────────────────────
-    // WorkManager — programación de sincronización
+    // Sincronización separada: Upload (por escaneo) y Full (periódico/manual)
     // ─────────────────────────────────────────────────────────────────────────
 
+    suspend fun inicializarEvento(eventoId: String): Result<SyncStats> {
+        // Limpiar datos ya sincronizados de otros eventos sin tocar pendientes de otros usuarios
+        dao.limpiarParticipantesSincronizadosDeOtrosEventos(eventoId)
+        dao.limpiarEscaneosSincronizadosDeOtrosEventos(eventoId)
+        dao.limpiarBeneficiosDeOtrosEventos(eventoId)
+
+        val esPrimeraDescarga = ultimoTimestampDelta(eventoId) == null
+        return sincronizarCompleto(eventoId = eventoId, descargaCompleta = esPrimeraDescarga)
+    }
+
     /**
-     * Encola una sincronización única que se ejecutará en cuanto haya red.
-     * Usa backoff exponencial (30 s → 60 s → 120 s → falla a los 3 intentos).
-     * Si ya existe un trabajo con el mismo nombre → lo reemplaza.
+     * Descarga únicamente los cambios incrementales (delta) del servidor usando el cursor
+     * persistido por evento. Si aún no existe cursor, realiza descarga inicial paginada.
      */
+    suspend fun descargarSoloCambios(
+        eventoId: String? = null,
+        descargaCompleta: Boolean = false
+    ): Result<Int> = runCatching {
+        if (!hayConexion()) {
+            throw IOException("Sin conexión a internet para descargar actualizaciones.")
+        }
+        syncMutex.withLock {
+            val idEvento = eventoId ?: obtenerSesionActual()?.eventoId
+                ?: throw IllegalStateException("No hay un evento activo en la sesión.")
+            descargarYActualizar(
+                eventoId = idEvento,
+                since = if (descargaCompleta) null else ultimoTimestampDelta(idEvento)
+            )
+        }
+    }
+
+    /**
+     * Sube únicamente los escaneos pendientes de la sesión activa (eventoId + staffId)
+     * en bucle hasta vaciar la cola o alcanzar [MAX_VUELTAS_UPLOAD].
+     */
+    suspend fun subirSoloPendientes(): Result<UploadStats> = runCatching {
+        if (!hayConexion()) {
+            throw IOException("Sin conexión a internet para subir escaneos pendientes.")
+        }
+        syncMutex.withLock {
+            val sesion = obtenerSesionActual()
+            val idEvento = sesion?.eventoId
+                ?: throw IllegalStateException("No hay un evento activo en la sesión.")
+            subirPendientesInterno(eventoId = idEvento, staffId = sesion.staffId)
+        }
+    }
+
+    suspend fun sincronizarCompleto(
+        eventoId: String? = null,
+        descargaCompleta: Boolean = false
+    ): Result<SyncStats> = runCatching {
+        if (!hayConexion()) {
+            throw IOException("Sin conexión a internet.")
+        }
+        syncMutex.withLock {
+            val sesion = obtenerSesionActual()
+            val idEvento = eventoId ?: sesion?.eventoId
+                ?: throw IllegalStateException("No hay un evento activo en la sesión.")
+
+            val upload = subirPendientesInterno(eventoId = idEvento, staffId = sesion?.staffId)
+            val descargados = descargarYActualizar(
+                eventoId = idEvento,
+                since = if (descargaCompleta) null else ultimoTimestampDelta(idEvento)
+            )
+
+            SyncStats(
+                subidos = upload.subidos,
+                rechazados = upload.rechazados,
+                conflictos = upload.conflictos,
+                descargados = descargados
+            )
+        }
+    }
+
+    private suspend fun subirPendientesInterno(eventoId: String, staffId: String?): UploadStats {
+        var totalConfirmados = 0
+        var totalConflictos = 0
+        var totalRechazados = 0
+        var vueltas = 0
+
+        while (vueltas < MAX_VUELTAS_UPLOAD) {
+            val pendientes = dao.obtenerPendientesSyncDeSesion(
+                eventoId = eventoId,
+                staffId = staffId,
+                limit = MAX_ESCANEOS_POR_LOTE
+            )
+            if (pendientes.isEmpty()) break
+
+            val validos = mutableListOf<EscaneoEntity>()
+            pendientes.forEach { escaneo ->
+                val participanteUuid = normalizarUuid(escaneo.participanteId)
+                val beneficioUuid = try {
+                    UUID.fromString(escaneo.beneficioId).toString()
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+
+                if (participanteUuid == null || beneficioUuid == null) {
+                    dao.marcarEscaneoConError(
+                        escaneo.participanteId,
+                        escaneo.beneficioId,
+                        "Identificador local inválido; no se puede sincronizar."
+                    )
+                    totalRechazados++
+                } else {
+                    validos.add(escaneo)
+                }
+            }
+
+            if (validos.isEmpty()) {
+                vueltas++
+                continue
+            }
+
+            val request = SyncUploadRequest(
+                escaneos = validos.map { escaneo ->
+                    EscaneoRequest(
+                        idParticipante = escaneo.participanteId,
+                        timestampEscaneo = escaneo.timestampEscaneo ?: System.currentTimeMillis(),
+                        beneficioId = escaneo.beneficioId,
+                        staffId = escaneo.scannedByStaffId,
+                        deviceId = escaneo.scannedByDeviceId ?: deviceId
+                    )
+                },
+                deviceId = deviceId
+            )
+
+            val response = apiService.subirEscaneos(request)
+            if (response.resultados.isEmpty()) {
+                throw IllegalStateException("El servidor no confirmó ningún escaneo del lote.")
+            }
+
+            val resultados = response.resultados
+            var omitidosReintentables = 0
+
+            validos.forEach { escaneo ->
+                val resultado = resultados.firstOrNull {
+                    it.idParticipante == escaneo.participanteId &&
+                        it.beneficioId != null &&
+                        it.beneficioId.equals(escaneo.beneficioId, ignoreCase = true)
+                } ?: resultados.firstOrNull {
+                    it.idParticipante == escaneo.participanteId && it.beneficioId == null
+                }
+
+                when {
+                    resultado == null -> {
+                        // Error transitorio / omisión del servidor: NO bloquear ni marcar syncError; reintentar.
+                        omitidosReintentables++
+                    }
+                    resultado.estado == EscaneoConfirmado.ESTADO_CONFIRMADO ||
+                        (resultado.estado == null && resultado.validado) -> {
+                        dao.marcarEscaneoSincronizado(
+                            escaneo.participanteId,
+                            escaneo.beneficioId,
+                            resultado.timestampValidado ?: escaneo.timestampEscaneo
+                        )
+                        totalConfirmados++
+                    }
+                    resultado.estado == EscaneoConfirmado.ESTADO_YA_ENTREGADO -> {
+                        dao.marcarEscaneoConflictoYaEntregado(
+                            participanteId = escaneo.participanteId,
+                            beneficioId = escaneo.beneficioId,
+                            timestampOriginal = resultado.timestampValidado,
+                            staffOriginalNombre = resultado.staffOriginalNombre,
+                            mensaje = resultado.mensaje ?: "Este beneficio ya había sido entregado previamente."
+                        )
+                        totalConflictos++
+                    }
+                    else -> {
+                        dao.marcarEscaneoConError(
+                            escaneo.participanteId,
+                            escaneo.beneficioId,
+                            resultado.mensaje ?: "Escaneo rechazado por el servidor."
+                        )
+                        totalRechazados++
+                    }
+                }
+            }
+
+            if (omitidosReintentables > 0) {
+                throw IllegalStateException(
+                    "El servidor no devolvió resultado para $omitidosReintentables escaneo(s); se reintentará."
+                )
+            }
+
+            vueltas++
+        }
+
+        return UploadStats(
+            subidos = totalConfirmados,
+            conflictos = totalConflictos,
+            rechazados = totalRechazados
+        )
+    }
+
+    private suspend fun descargarYActualizar(eventoId: String, since: Long?): Int {
+        var page = 0
+        var totalProcesados = 0
+        var cursorServidor: Long? = null
+
+        while (page < MAX_PAGINAS_DOWNLOAD) {
+            val response = apiService.descargarEstado(
+                eventoId = eventoId,
+                since = since,
+                page = page,
+                size = PAGE_SIZE_DOWNLOAD
+            )
+
+            if (page == 0) {
+                cursorServidor = response.timestampServidor
+            }
+
+            val beneficiosEntities = response.beneficios.map { it.toEntity(eventoId) }
+            val (eliminadosDto, activosDto) = response.participantes.partition { it.eliminado }
+            val idsEliminados = eliminadosDto.map { it.idParticipante }
+
+            val participantesActivos = activosDto.map { dto ->
+                ParticipanteEntity(
+                    idParticipante = dto.idParticipante,
+                    nombre = dto.nombre,
+                    documento = dto.documento,
+                    correo = dto.correo,
+                    eventoId = eventoId
+                )
+            }
+
+            // Carga en bloque de escaneos existentes para esta página (evita N+1)
+            val idsActivos = activosDto.map { it.idParticipante }
+            val escaneosLocalesPorClave = mutableMapOf<Pair<String, String>, EscaneoEntity>()
+            idsActivos.chunked(500).forEach { chunk ->
+                dao.obtenerEscaneosDeParticipantes(chunk).forEach { esc ->
+                    escaneosLocalesPorClave[esc.participanteId to esc.beneficioId] = esc
+                }
+            }
+
+            val escaneosUpsert = mutableListOf<EscaneoEntity>()
+            val escaneosBorrar = mutableListOf<Pair<String, String>>()
+
+            activosDto.forEach { dto ->
+                dto.beneficiosEstado.forEach { estado ->
+                    val local = escaneosLocalesPorClave[dto.idParticipante to estado.beneficioId]
+                    if (local?.pendienteSubida == true) {
+                        // Nunca pisar un escaneo local pendiente de subir
+                        return@forEach
+                    }
+                    if (estado.entregado) {
+                        escaneosUpsert.add(
+                            EscaneoEntity(
+                                participanteId = dto.idParticipante,
+                                beneficioId = estado.beneficioId,
+                                eventoId = eventoId,
+                                entregado = true,
+                                timestampEscaneo = estado.timestampEscaneo,
+                                sincronizadoConBackend = true,
+                                pendienteSubida = false,
+                                scannedByStaffId = estado.staffId,
+                                scannedByStaffNombre = estado.staffNombre,
+                                scannedByDeviceId = estado.deviceId,
+                                syncError = null,
+                                conflicto = local?.conflicto == true,
+                                conflictoStaffOriginal = local?.conflictoStaffOriginal,
+                                conflictoFechaOriginal = local?.conflictoFechaOriginal,
+                                conflictoMensaje = local?.conflictoMensaje
+                            )
+                        )
+                    } else {
+                        escaneosBorrar.add(dto.idParticipante to estado.beneficioId)
+                    }
+                }
+            }
+
+            dao.aplicarPaginaDescarga(
+                beneficios = beneficiosEntities,
+                participantesActivos = participantesActivos,
+                idsEliminados = idsEliminados,
+                escaneosUpsert = escaneosUpsert,
+                escaneosBorrar = escaneosBorrar
+            )
+
+            totalProcesados += response.participantes.size
+
+            if (!response.hasMore) break
+            page++
+        }
+
+        // Guardar cursor del servidor SOLO cuando todas las páginas terminaron con éxito
+        if (cursorServidor != null) {
+            dao.upsertSyncMeta(SyncMetaEntity(keyDelta(eventoId), cursorServidor.toString()))
+        }
+        return totalProcesados
+    }
+
+    private fun keyDelta(eventoId: String): String = "${KEY_ULTIMO_DELTA_PREFIX}_$eventoId"
+
+    private suspend fun ultimoTimestampDelta(eventoId: String): Long? =
+        dao.obtenerMeta(keyDelta(eventoId))?.toLongOrNull()
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WorkManager
+    // ─────────────────────────────────────────────────────────────────────────
+
     fun programarSyncUnica() {
+        uploadScheduler?.let {
+            it()
+            return
+        }
+        val ctx = context ?: return
+
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
 
         val request = OneTimeWorkRequestBuilder<SyncWorker>()
             .setConstraints(constraints)
+            .setInitialDelay(2, TimeUnit.SECONDS)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .setInputData(workDataOf(SyncWorker.KEY_MODE to SyncWorker.MODE_UPLOAD))
             .addTag(SyncWorker.TAG_SYNC_UNICA)
             .build()
 
-        WorkManager.getInstance(context)
+        WorkManager.getInstance(ctx)
             .enqueueUniqueWork(
                 SyncWorker.TAG_SYNC_UNICA,
-                ExistingWorkPolicy.REPLACE,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
                 request
             )
     }
 
-    /**
-     * Registra la sincronización periódica cada 15 minutos (mínimo de WorkManager).
-     * Solo se ejecuta si hay conectividad.
-     * [ExistingPeriodicWorkPolicy.KEEP] → no resetea el intervalo si ya existe.
-     *
-     * Llamar una vez al inicio de la app (en [OzarApplication.onCreate]).
-     */
     fun programarSyncPeriodico() {
+        val ctx = context ?: return
+
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
 
         val periodicRequest = PeriodicWorkRequestBuilder<SyncWorker>(
-            repeatInterval         = 15,
+            repeatInterval = 15,
             repeatIntervalTimeUnit = TimeUnit.MINUTES
         )
             .setConstraints(constraints)
+            .setInputData(workDataOf(SyncWorker.KEY_MODE to SyncWorker.MODE_FULL))
             .addTag(SyncWorker.TAG_SYNC_PERIODICA)
             .build()
 
-        WorkManager.getInstance(context)
+        WorkManager.getInstance(ctx)
             .enqueueUniquePeriodicWork(
                 SyncWorker.TAG_SYNC_PERIODICA,
                 ExistingPeriodicWorkPolicy.KEEP,
@@ -467,103 +708,35 @@ class ParticipanteRepository(
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Utilidades de red
+    // Utilidades
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Devuelve true si el dispositivo tiene conectividad a internet activa y validada.
-     * Requiere permiso android.permission.ACCESS_NETWORK_STATE en el Manifest.
-     */
     fun hayConexion(): Boolean {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network      = cm.activeNetwork ?: return false
+        connectivityChecker?.let { return it() }
+        val ctx = context ?: return false
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = cm.activeNetwork ?: return false
         val capabilities = cm.getNetworkCapabilities(network) ?: return false
         return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-               capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
-    companion object {
-        val MOCK_PARTICIPANTES = listOf(
-            ParticipanteEntity(
-                idParticipante         = "10482914",
-                nombre                 = "María Camila Pérez",
-                beneficioEntregado     = true,
-                timestampEscaneo       = System.currentTimeMillis() - 1000L * 60 * 15, // hace 15 min
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = "10482914",
-                correo                 = "maria.perez@zendov.com"
-            ),
-            ParticipanteEntity(
-                idParticipante         = "28491023",
-                nombre                 = "Andrés Rodríguez",
-                beneficioEntregado     = false,
-                timestampEscaneo       = null,
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = "28491023",
-                correo                 = "andres.rodriguez@zendov.com"
-            ),
-            ParticipanteEntity(
-                idParticipante         = "19482019",
-                nombre                 = "Carlos Andrés Gómez",
-                beneficioEntregado     = true,
-                timestampEscaneo       = System.currentTimeMillis() - 1000L * 60 * 35, // hace 35 min
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = "19482019",
-                correo                 = "carlos.gomez@zendov.com"
-            ),
-            ParticipanteEntity(
-                idParticipante         = "30192841",
-                nombre                 = "Valeria Sofía Martínez",
-                beneficioEntregado     = false,
-                timestampEscaneo       = null,
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = "30192841",
-                correo                 = "valeria.martinez@zendov.com"
-            ),
-            ParticipanteEntity(
-                idParticipante         = "12345678",
-                nombre                 = "Diego Fernando Vargas",
-                beneficioEntregado     = true,
-                timestampEscaneo       = System.currentTimeMillis() - 1000L * 60 * 5, // hace 5 min
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = "12345678",
-                correo                 = "diego.vargas@zendov.com"
-            ),
-            ParticipanteEntity(
-                idParticipante         = "45910283",
-                nombre                 = "Lucía Mariana Rojas",
-                beneficioEntregado     = false,
-                timestampEscaneo       = null,
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = "45910283",
-                correo                 = "lucia.rojas@zendov.com"
-            ),
-            ParticipanteEntity(
-                idParticipante         = "50192847",
-                nombre                 = "Esteban Javier Mendoza",
-                beneficioEntregado     = true,
-                timestampEscaneo       = System.currentTimeMillis() - 1000L * 60 * 50, // hace 50 min
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = "50192847",
-                correo                 = "esteban.mendoza@zendov.com"
-            ),
-            ParticipanteEntity(
-                idParticipante         = "60291834",
-                nombre                 = "Alejandro Morales Rivera",
-                beneficioEntregado     = false,
-                timestampEscaneo       = null,
-                sincronizadoConBackend = true,
-                pendienteSubida        = false,
-                documento              = "60291834",
-                correo                 = "alejandro.morales@zendov.com"
-            )
+    private fun BeneficioActivoDto.toEntity(eventoIdFallback: String): BeneficioEntity =
+        BeneficioEntity(
+            id = id,
+            nombre = nombre,
+            orden = orden,
+            estado = estado,
+            eventoId = eventoId.ifBlank { eventoIdFallback },
+            eventoNombre = eventoNombre,
+            descripcion = descripcion
         )
+
+    companion object {
+        private const val KEY_ULTIMO_DELTA_PREFIX = "ultimo_delta_timestamp"
+        private const val MAX_ESCANEOS_POR_LOTE = 200
+        private const val MAX_VUELTAS_UPLOAD = 20
+        private const val PAGE_SIZE_DOWNLOAD = 500
+        private const val MAX_PAGINAS_DOWNLOAD = 50
     }
 }

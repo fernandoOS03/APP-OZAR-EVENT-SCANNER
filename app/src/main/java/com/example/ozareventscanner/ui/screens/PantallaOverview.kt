@@ -31,9 +31,25 @@ fun PantallaOverview(
 ) {
     val totalAsistentes by eventoViewModel.totalAsistentes.collectAsState()
     val beneficios by eventoViewModel.beneficiosActivos.collectAsState()
-    val participantes by eventoViewModel.listaParticipantes.collectAsState()
+    val conteoPorBeneficio by eventoViewModel.conteoPorBeneficio.collectAsState()
+    val totalEscaneados by eventoViewModel.totalParticipantesEscaneados.collectAsState()
+    val escaneos by eventoViewModel.escaneosEntregados.collectAsState()
 
-    val totalEscaneados = participantes.count { it.beneficioEntregado }
+    val escaneosUltimaHora = remember(escaneos) {
+        val ahora = System.currentTimeMillis()
+        escaneos.count { (it.timestampEscaneo ?: 0L) >= ahora - 60 * 60 * 1000L }
+    }
+    val barrasActividad = remember(escaneos) {
+        val ahora = System.currentTimeMillis()
+        val tamanoBucket = 5 * 60 * 1000L
+        val conteos = (11 downTo 0).map { indice ->
+            val desde = ahora - (indice + 1) * tamanoBucket
+            val hasta = ahora - indice * tamanoBucket
+            escaneos.count { (it.timestampEscaneo ?: 0L) in desde until hasta }
+        }
+        val maximo = conteos.maxOrNull()?.coerceAtLeast(1) ?: 1
+        conteos.map { (it.toFloat() / maximo.toFloat()).coerceIn(0.08f, 1f) }
+    }
     val porcentaje = if (totalAsistentes > 0) {
         ((totalEscaneados.toFloat() / totalAsistentes.toFloat()) * 100).toInt()
     } else {
@@ -181,7 +197,7 @@ fun PantallaOverview(
                     Spacer(modifier = Modifier.height(20.dp))
 
                     // Sparkline (Histograma de barras de actividad en vivo)
-                    val mockBarras = listOf(0.26f, 0.34f, 0.28f, 0.46f, 0.41f, 0.58f, 0.54f, 0.72f, 0.64f, 0.84f, 0.76f, 0.94f)
+                    val mockBarras = barrasActividad
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -259,7 +275,7 @@ fun PantallaOverview(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "${(totalEscaneados * 0.35).toInt().coerceAtLeast(1)}",
+                            text = "$escaneosUltimaHora",
                             fontSize = 26.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = GreenDark2
@@ -313,8 +329,8 @@ fun PantallaOverview(
         }
 
         // ── 5. Filas de progreso por beneficio ────────────────────────────────
-        items(beneficios) { beneficio ->
-            val entregados = (totalEscaneados * (0.6f + (beneficio.orden * 0.1f)).coerceAtMost(1f)).toInt()
+        items(beneficios, key = { it.id }) { beneficio ->
+            val entregados = conteoPorBeneficio[beneficio.id] ?: 0
             val pctBeneficio = if (totalAsistentes > 0) ((entregados.toFloat() / totalAsistentes.toFloat()) * 100).toInt() else 0
 
             Card(

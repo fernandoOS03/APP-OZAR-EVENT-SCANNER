@@ -65,35 +65,21 @@ class OzarApplication : Application(), Configuration.Provider {
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
             ?: return
 
-        var conexionPrevia = repository.hayConexion()
-
         val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: android.net.Network) {
-                // Se detectó conexión; si venía de estar desconectado o al reconectar, sincronizar pendientes
-                applicationScope.launch {
-                    try {
-                        kotlinx.coroutines.delay(1000) // Breve estabilización de red
-                        if (repository.hayConexion()) {
-                            repository.sincronizarCompleto()
-                        }
-                    } catch (e: Exception) {
-                        // Respaldo con WorkManager si falla llamada directa
-                        repository.programarSyncUnica()
-                    }
+                // Al recuperar conexión, encolar únicamente subida de pendientes vía WorkManager
+                if (sessionManager.estaAutenticado()) {
+                    repository.programarSyncUnica()
                 }
-                conexionPrevia = true
-            }
-
-            override fun onLost(network: android.net.Network) {
-                conexionPrevia = false
             }
         }
 
         try {
             connectivityManager.registerDefaultNetworkCallback(networkCallback)
-        } catch (e: Exception) {
-            // Fallback: programar sync única condicionada por WorkManager
-            repository.programarSyncUnica()
+        } catch (_: Exception) {
+            if (sessionManager.estaAutenticado()) {
+                repository.programarSyncUnica()
+            }
         }
     }
 }

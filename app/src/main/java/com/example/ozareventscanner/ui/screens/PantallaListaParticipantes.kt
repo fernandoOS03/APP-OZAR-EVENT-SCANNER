@@ -25,7 +25,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ozareventscanner.data.ParticipanteEntity
+import androidx.paging.LoadState
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
+import com.example.ozareventscanner.data.BeneficioEntity
+import com.example.ozareventscanner.data.ParticipanteConBeneficios
 import com.example.ozareventscanner.ui.theme.*
 import com.example.ozareventscanner.viewmodel.EventoViewModel
 
@@ -42,30 +46,19 @@ fun PantallaListaParticipantes(
     mostrarBotonVolver: Boolean = false,
     onVolver: () -> Unit = {}
 ) {
-    val participantes by viewModel.listaParticipantes.collectAsState()
+    val lazyPagingItems = viewModel.participantesPaginados.collectAsLazyPagingItems()
+    val totalAsistentes by viewModel.totalAsistentes.collectAsState()
     val beneficios by viewModel.beneficiosActivos.collectAsState()
     val query by viewModel.busquedaQuery.collectAsState()
-    val cargando by viewModel.cargandoParticipantes.collectAsState()
     val keyboard = LocalSoftwareKeyboardController.current
 
     // Participante seleccionado para el ModalBottomSheet de beneficios
-    var participanteSeleccionado by remember { mutableStateOf<ParticipanteEntity?>(null) }
+    var participanteSeleccionado by remember { mutableStateOf<ParticipanteConBeneficios?>(null) }
 
-    // Lista de nombres de beneficios (activos del backend o mock editorial por defecto)
-    val nombresBeneficios = remember(beneficios) {
-        if (beneficios.isNotEmpty()) {
-            beneficios.map { it.nombre }
-        } else {
-            listOf("Kit de bienvenida", "Almuerzo ejecutivo", "Acceso conferencia", "Merch oficial")
-        }
-    }
-    val totalBeneficios = nombresBeneficios.size
+    val beneficiosDisponibles = beneficios
+    val totalBeneficios = beneficiosDisponibles.size
+    val estaCargandoInicial = lazyPagingItems.loadState.refresh is LoadState.Loading && lazyPagingItems.itemCount == 0
 
-    LaunchedEffect(Unit) {
-        viewModel.cargarParticipantes()
-    }
-
-    val entregadosMap by viewModel.beneficiosEntregadosPorParticipante.collectAsState()
 
     LazyColumn(
         modifier = Modifier
@@ -197,15 +190,19 @@ fun PantallaListaParticipantes(
         // ── 3. Summary Bar: Total de Participantes Registrados ─────────────────
         item {
             Text(
-                text = "${participantes.size} participantes registrados",
+                text = if (query.isBlank()) {
+                    "$totalAsistentes participantes registrados"
+                } else {
+                    "${lazyPagingItems.itemCount} resultado(s) cargados"
+                },
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 color = ColorForegroundMuted
             )
         }
 
-        // ── 4. Lista Limpia y Plana de Asistentes ─────────────────────────────
-        if (cargando && participantes.isEmpty()) {
+        // ── 4. Lista Virtualizada Paginada de Asistentes (Paging 3) ───────────
+        if (estaCargandoInicial) {
             item {
                 Box(
                     modifier = Modifier
@@ -216,7 +213,7 @@ fun PantallaListaParticipantes(
                     CircularProgressIndicator(color = GreenDark2)
                 }
             }
-        } else if (participantes.isEmpty()) {
+        } else if (lazyPagingItems.itemCount == 0) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -248,37 +245,28 @@ fun PantallaListaParticipantes(
                 }
             }
         } else {
-            item {
+            items(
+                count = lazyPagingItems.itemCount,
+                key = lazyPagingItems.itemKey { it.idParticipante }
+            ) { index ->
+                val participante = lazyPagingItems[index] ?: return@items
+                val cantidadEntregados = participante.beneficiosEntregados.size
+
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(14.dp),
                     colors = CardDefaults.cardColors(containerColor = Color.White),
                     border = BorderStroke(1.dp, GrayLight2),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        participantes.forEachIndexed { index, participante ->
-                            val entregadosSet = entregadosMap[participante.idParticipante]
-                                ?: (if (participante.beneficioEntregado) nombresBeneficios.toSet() else emptySet())
-                            val cantidadEntregados = entregadosSet.size
-
-                            FilaParticipante(
-                                participante = participante,
-                                cantidadEntregados = cantidadEntregados,
-                                totalBeneficios = totalBeneficios,
-                                onClick = {
-                                    participanteSeleccionado = participante
-                                }
-                            )
-
-                            if (index < participantes.size - 1) {
-                                HorizontalDivider(
-                                    thickness = 1.dp,
-                                    color = GrayLight2
-                                )
-                            }
+                    FilaParticipante(
+                        participante = participante,
+                        cantidadEntregados = cantidadEntregados,
+                        totalBeneficios = totalBeneficios,
+                        onClick = {
+                            participanteSeleccionado = participante
                         }
-                    }
+                    )
                 }
             }
         }
@@ -286,11 +274,14 @@ fun PantallaListaParticipantes(
 
     // ── 5. ModalBottomSheet Nativo Material 3: Beneficios Asignados ───────────
     if (participanteSeleccionado != null) {
-        val participanteActual = participantes.find { it.idParticipante == participanteSeleccionado?.idParticipante }
+        val seleccionadoId = participanteSeleccionado?.idParticipante
+        val participanteActual = (0 until lazyPagingItems.itemCount)
+            .asSequence()
+            .mapNotNull { lazyPagingItems.peek(it) }
+            .firstOrNull { it.idParticipante == seleccionadoId }
             ?: participanteSeleccionado!!
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        val entregadosSet = entregadosMap[participanteActual.idParticipante]
-            ?: (if (participanteActual.beneficioEntregado) nombresBeneficios.toSet() else emptySet())
+        val entregadosSet = participanteActual.beneficiosEntregados
 
         ModalBottomSheet(
             onDismissRequest = { participanteSeleccionado = null },
@@ -303,14 +294,13 @@ fun PantallaListaParticipantes(
         ) {
             ModalBeneficiosParticipante(
                 participante = participanteActual,
-                beneficiosNombres = nombresBeneficios,
+                beneficios = beneficiosDisponibles,
                 beneficiosEntregados = entregadosSet,
                 totalBeneficios = totalBeneficios,
-                onEntregarBeneficio = { nombreBen ->
+                onEntregarBeneficio = { beneficio ->
                     viewModel.entregarBeneficioIndividual(
                         idParticipante = participanteActual.idParticipante,
-                        nombreBeneficio = nombreBen,
-                        todosLosBeneficios = nombresBeneficios
+                        beneficioId = beneficio.id
                     )
                 },
                 onCerrar = { participanteSeleccionado = null }
@@ -324,7 +314,7 @@ fun PantallaListaParticipantes(
  */
 @Composable
 private fun FilaParticipante(
-    participante: ParticipanteEntity,
+    participante: ParticipanteConBeneficios,
     cantidadEntregados: Int,
     totalBeneficios: Int,
     onClick: () -> Unit
@@ -349,13 +339,13 @@ private fun FilaParticipante(
 
         Surface(
             shape = RoundedCornerShape(999.dp),
-            color = if (participante.beneficioEntregado) GreenLight3 else GrayLight2
+            color = if (cantidadEntregados > 0) GreenLight3 else GrayLight2
         ) {
             Text(
                 text = "$cantidadEntregados/$totalBeneficios",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (participante.beneficioEntregado) GreenDark2 else ColorForegroundMuted,
+                color = if (cantidadEntregados > 0) GreenDark2 else ColorForegroundMuted,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
             )
@@ -368,15 +358,15 @@ private fun FilaParticipante(
  */
 @Composable
 private fun ModalBeneficiosParticipante(
-    participante: ParticipanteEntity,
-    beneficiosNombres: List<String>,
+    participante: ParticipanteConBeneficios,
+    beneficios: List<BeneficioEntity>,
     beneficiosEntregados: Set<String>,
     totalBeneficios: Int,
-    onEntregarBeneficio: (String) -> Unit,
+    onEntregarBeneficio: (BeneficioEntity) -> Unit,
     onCerrar: () -> Unit
 ) {
-    val todosEntregados = participante.beneficioEntregado || beneficiosEntregados.size >= totalBeneficios
-    val entregadosCount = if (participante.beneficioEntregado) totalBeneficios else beneficiosEntregados.size
+    val todosEntregados = totalBeneficios > 0 && beneficiosEntregados.size >= totalBeneficios
+    val entregadosCount = beneficiosEntregados.size
 
     Column(
         modifier = Modifier
@@ -450,8 +440,8 @@ private fun ModalBeneficiosParticipante(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            beneficiosNombres.forEach { nombreBen ->
-                val entregado = participante.beneficioEntregado || beneficiosEntregados.contains(nombreBen)
+            beneficios.forEach { beneficio ->
+                val entregado = beneficiosEntregados.contains(beneficio.id)
 
                 Row(
                     modifier = Modifier
@@ -484,7 +474,7 @@ private fun ModalBeneficiosParticipante(
                         }
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(
-                            text = nombreBen,
+                            text = beneficio.nombre,
                             fontSize = 14.sp,
                             fontWeight = if (entregado) FontWeight.SemiBold else FontWeight.Medium,
                             color = if (entregado) ColorForeground else ColorForegroundMuted
@@ -517,7 +507,7 @@ private fun ModalBeneficiosParticipante(
                         }
                     } else {
                         Button(
-                            onClick = { onEntregarBeneficio(nombreBen) },
+                            onClick = { onEntregarBeneficio(beneficio) },
                             shape = RoundedCornerShape(999.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = GreenDark2,

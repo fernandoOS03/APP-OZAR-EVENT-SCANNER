@@ -1,31 +1,35 @@
 package com.example.ozareventscanner.data
 
+import androidx.paging.PagingSource
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
+import kotlinx.coroutines.flow.Flow
 
-/**
- * DAO de Room para operaciones sobre la tabla `participantes`.
- *
- * Operaciones agrupadas:
- *  ▸ CRUD básico: insertarParticipantes, buscarParticipante, obtenerTodos.
- *  ▸ Escaneo: actualizarBeneficio, marcarEscaneoLocal.
- *  ▸ Sincronización: obtenerPendientesSync, marcarLoteComoSincronizado,
- *                    revertirEscaneoRechazado, sincronizarDesdeBackend.
- */
 @Dao
 interface ParticipanteDao {
-
-    // ── CRUD básico ───────────────────────────────────────────────────────────
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertarParticipantes(participantes: List<ParticipanteEntity>)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertarBeneficios(beneficios: List<BeneficioEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertEscaneos(escaneos: List<EscaneoEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertEscaneo(escaneo: EscaneoEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSyncMeta(meta: SyncMetaEntity)
+
     @Query("""
-        SELECT * FROM participantes 
-        WHERE idParticipante = :id 
-           OR (documento IS NOT NULL AND documento = :id) 
+        SELECT * FROM participantes
+        WHERE idParticipante = :id
+           OR (documento IS NOT NULL AND documento = :id)
            OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
         LIMIT 1
     """)
@@ -34,138 +38,246 @@ interface ParticipanteDao {
     @Query("SELECT * FROM participantes ORDER BY nombre ASC")
     suspend fun obtenerTodos(): List<ParticipanteEntity>
 
+    @Transaction
+    @Query("SELECT * FROM participantes ORDER BY nombre ASC")
+    fun pagingTodos(): PagingSource<Int, ParticipanteConEscaneosRelation>
+
+    @Transaction
+    @Query("""
+        SELECT * FROM participantes
+        WHERE nombre LIKE :prefix || '%' COLLATE NOCASE
+           OR (documento IS NOT NULL AND documento LIKE :prefix || '%' COLLATE NOCASE)
+           OR (correo IS NOT NULL AND correo LIKE :prefix || '%' COLLATE NOCASE)
+           OR idParticipante LIKE :prefix || '%' COLLATE NOCASE
+        ORDER BY nombre ASC
+    """)
+    fun pagingBuscarPorPrefijo(prefix: String): PagingSource<Int, ParticipanteConEscaneosRelation>
+
+    @Query("""
+        SELECT beneficioId, COUNT(*) AS total
+        FROM escaneos
+        WHERE entregado = 1 AND syncError IS NULL
+        GROUP BY beneficioId
+    """)
+    fun observarConteoPorBeneficio(): Flow<List<BeneficioConteo>>
+
+    @Query("SELECT COUNT(DISTINCT participanteId) FROM escaneos WHERE entregado = 1 AND syncError IS NULL")
+    fun observarTotalParticipantesEscaneados(): Flow<Int>
+
+    @Query("SELECT * FROM escaneos WHERE entregado = 1 AND syncError IS NULL")
+    fun observarEscaneosEntregados(): Flow<List<EscaneoEntity>>
+
     @Query("SELECT COUNT(*) FROM participantes")
     suspend fun contarTotalParticipantes(): Int
 
     @Query("SELECT COUNT(*) FROM participantes")
-    fun observarTotalParticipantes(): kotlinx.coroutines.flow.Flow<Int>
+    fun observarTotalParticipantes(): Flow<Int>
 
-    /** Busca participantes por nombre, ID, DNI o Correo (case-insensitive). */
     @Query("""
-        SELECT * FROM participantes 
-        WHERE LOWER(nombre) LIKE '%' || LOWER(:query) || '%' 
-           OR LOWER(idParticipante) LIKE '%' || LOWER(:query) || '%' 
+        SELECT * FROM participantes
+        WHERE LOWER(nombre) LIKE '%' || LOWER(:query) || '%'
+           OR LOWER(idParticipante) LIKE '%' || LOWER(:query) || '%'
            OR (documento IS NOT NULL AND LOWER(documento) LIKE '%' || LOWER(:query) || '%')
            OR (correo IS NOT NULL AND LOWER(correo) LIKE '%' || LOWER(:query) || '%')
         ORDER BY nombre ASC
     """)
     suspend fun buscarPorNombreOId(query: String): List<ParticipanteEntity>
 
-    // ── Escaneo ───────────────────────────────────────────────────────────────
+    @Query("SELECT * FROM escaneos")
+    suspend fun obtenerTodosEscaneos(): List<EscaneoEntity>
 
-    /** Actualiza solo el flag de beneficio (usado en flujos de corrección). */
-    @Query("UPDATE participantes SET beneficioEntregado = :entregado WHERE idParticipante = :id")
-    suspend fun actualizarBeneficio(id: String, entregado: Boolean)
+    @Query("SELECT * FROM escaneos")
+    fun observarEscaneos(): Flow<List<EscaneoEntity>>
 
-    /**
-     * Registra un escaneo QR local con timestamp y auditoría offline.
-     * Establece [beneficioEntregado] = true, [pendienteSubida] = true y guarda el timestamp y staff.
-     * Este es el primer paso del flujo offline-first antes de sincronizar con el backend.
-     */
+    @Query("SELECT * FROM escaneos WHERE participanteId = :participanteId")
+    suspend fun obtenerEscaneosDeParticipante(participanteId: String): List<EscaneoEntity>
+
+    @Query("SELECT * FROM escaneos WHERE participanteId IN (:participanteIds)")
+    suspend fun obtenerEscaneosDeParticipantes(participanteIds: List<String>): List<EscaneoEntity>
+
+    @Query("SELECT * FROM escaneos WHERE participanteId = :participanteId AND beneficioId = :beneficioId LIMIT 1")
+    suspend fun obtenerEscaneo(participanteId: String, beneficioId: String): EscaneoEntity?
+
     @Query("""
-        UPDATE participantes
-        SET beneficioEntregado     = 1,
-            timestampEscaneo       = :timestamp,
-            pendienteSubida        = 1,
-            sincronizadoConBackend  = 0,
-            scannedByStaffId       = :staffId,
-            scannedByStaffNombre   = :staffNombre,
-            scannedByDeviceId      = :deviceId,
-            beneficioId            = :beneficioId
-        WHERE idParticipante = :id 
-           OR (documento IS NOT NULL AND documento = :id) 
-           OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
+        SELECT * FROM escaneos
+        WHERE pendienteSubida = 1 AND syncError IS NULL
+        ORDER BY timestampEscaneo ASC
     """)
-    suspend fun marcarEscaneoLocalConAuditoria(
-        id: String,
-        timestamp: Long,
-        staffId: String?,
-        staffNombre: String?,
-        deviceId: String?,
-        beneficioId: String?
-    )
+    suspend fun obtenerPendientesSync(): List<EscaneoEntity>
 
-    /**
-     * Sobrecarga simple para compatibilidad previa.
-     */
-    suspend fun marcarEscaneoLocal(id: String, timestamp: Long) {
-        marcarEscaneoLocalConAuditoria(id, timestamp, null, null, null, null)
-    }
-
-    /**
-     * Marca el escaneo como confirmado y sincronizado con el backend.
-     */
     @Query("""
-        UPDATE participantes
-        SET beneficioEntregado     = 1,
-            timestampEscaneo       = :timestamp,
-            pendienteSubida        = 0,
-            sincronizadoConBackend  = 1,
-            scannedByStaffId       = :staffId,
-            scannedByStaffNombre   = :staffNombre,
-            scannedByDeviceId      = :deviceId,
-            beneficioId            = :beneficioId
-        WHERE idParticipante = :id 
-           OR (documento IS NOT NULL AND documento = :id) 
-           OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
+        SELECT * FROM escaneos
+        WHERE pendienteSubida = 1
+          AND syncError IS NULL
+          AND (eventoId = :eventoId OR eventoId = '')
+          AND (:staffId IS NULL OR scannedByStaffId IS NULL OR scannedByStaffId = :staffId)
+        ORDER BY timestampEscaneo ASC
+        LIMIT :limit
     """)
-    suspend fun marcarEscaneoConfirmadoConAuditoria(
-        id: String,
-        timestamp: Long,
+    suspend fun obtenerPendientesSyncDeSesion(
+        eventoId: String,
         staffId: String?,
-        staffNombre: String?,
-        deviceId: String?,
-        beneficioId: String?
-    )
+        limit: Int
+    ): List<EscaneoEntity>
 
-    suspend fun marcarEscaneoConfirmado(id: String, timestamp: Long) {
-        marcarEscaneoConfirmadoConAuditoria(id, timestamp, null, null, null, null)
-    }
-
-
-    // ── Sincronización ────────────────────────────────────────────────────────
-
-    /**
-     * Devuelve todos los registros con [pendienteSubida] = true.
-     * Son los que se enviarán en el siguiente POST /sync/upload.
-     */
-    @Query("SELECT * FROM participantes WHERE pendienteSubida = 1")
-    suspend fun obtenerPendientesSync(): List<ParticipanteEntity>
-
-    /**
-     * Marca un lote de participantes como sincronizados tras la confirmación del backend.
-     * Se llama con los IDs devueltos en [SyncUploadResponse.resultados] donde validado = true.
-     */
     @Query("""
-        UPDATE participantes
+        SELECT COUNT(*) FROM escaneos
+        WHERE pendienteSubida = 1
+          AND syncError IS NULL
+          AND (eventoId = :eventoId OR eventoId = '')
+          AND (:staffId IS NULL OR scannedByStaffId IS NULL OR scannedByStaffId = :staffId)
+    """)
+    suspend fun contarPendientesSyncDeSesion(eventoId: String, staffId: String?): Int
+
+    @Query("SELECT COUNT(*) FROM escaneos WHERE pendienteSubida = 1 AND syncError IS NULL")
+    fun observarPendientesSync(): Flow<Int>
+
+    @Query("""
+        SELECT COUNT(*) FROM escaneos
+        WHERE pendienteSubida = 1
+          AND syncError IS NULL
+          AND (eventoId = :eventoId OR eventoId = '')
+          AND (:staffId IS NULL OR scannedByStaffId IS NULL OR scannedByStaffId = :staffId)
+    """)
+    fun observarPendientesSyncDeSesion(eventoId: String, staffId: String?): Flow<Int>
+
+    @Query("""
+        SELECT COUNT(*) FROM escaneos
+        WHERE pendienteSubida = 1
+          AND syncError IS NULL
+          AND (
+              (eventoId != '' AND eventoId != :eventoId)
+              OR (:staffId IS NOT NULL AND scannedByStaffId IS NOT NULL AND scannedByStaffId != :staffId)
+          )
+    """)
+    fun observarPendientesOtrosUsuarios(eventoId: String, staffId: String?): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM escaneos WHERE conflicto = 1 AND (eventoId = :eventoId OR eventoId = '')")
+    fun observarConflictosCount(eventoId: String): Flow<Int>
+
+    @Query("SELECT * FROM escaneos WHERE conflicto = 1 AND (eventoId = :eventoId OR eventoId = '') ORDER BY timestampEscaneo DESC")
+    suspend fun obtenerConflictos(eventoId: String): List<EscaneoEntity>
+
+    @Query("""
+        UPDATE escaneos
         SET sincronizadoConBackend = 1,
-            pendienteSubida        = 0
-        WHERE idParticipante IN (:ids)
+            pendienteSubida = 0,
+            syncError = NULL,
+            conflicto = 0,
+            timestampEscaneo = :timestamp
+        WHERE participanteId = :participanteId AND beneficioId = :beneficioId
     """)
-    suspend fun marcarLoteComoSincronizado(ids: List<String>)
+    suspend fun marcarEscaneoSincronizado(
+        participanteId: String,
+        beneficioId: String,
+        timestamp: Long?
+    )
 
-    /**
-     * Revierte el escaneo de un participante rechazado por el backend.
-     * Ocurre en conflictos de doble escaneo: otro dispositivo escaneó antes (menor timestamp).
-     * Resultado: [beneficioEntregado] = false, [pendienteSubida] = false.
-     */
     @Query("""
-        UPDATE participantes
-        SET beneficioEntregado    = 0,
-            timestampEscaneo      = NULL,
-            pendienteSubida       = 0,
-            sincronizadoConBackend = 1
-        WHERE idParticipante = :id 
-           OR (documento IS NOT NULL AND documento = :id) 
-           OR (correo IS NOT NULL AND LOWER(correo) = LOWER(:id))
+        UPDATE escaneos
+        SET entregado = 1,
+            sincronizadoConBackend = 1,
+            pendienteSubida = 0,
+            syncError = NULL,
+            timestampEscaneo = COALESCE(:timestampOriginal, timestampEscaneo),
+            scannedByStaffNombre = COALESCE(:staffOriginalNombre, scannedByStaffNombre),
+            conflicto = 1,
+            conflictoStaffOriginal = :staffOriginalNombre,
+            conflictoFechaOriginal = :timestampOriginal,
+            conflictoMensaje = :mensaje
+        WHERE participanteId = :participanteId AND beneficioId = :beneficioId
     """)
-    suspend fun revertirEscaneoRechazado(id: String)
+    suspend fun marcarEscaneoConflictoYaEntregado(
+        participanteId: String,
+        beneficioId: String,
+        timestampOriginal: Long?,
+        staffOriginalNombre: String?,
+        mensaje: String?
+    )
 
-    /**
-     * Reemplaza Room con el estado canónico descargado del servidor (GET /sync/download).
-     * Usa REPLACE para actualizar registros existentes y agregar nuevos.
-     * Los registros del servidor tienen siempre [sincronizadoConBackend] = true.
-     */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun sincronizarDesdeBackend(participantes: List<ParticipanteEntity>)
+    @Query("""
+        UPDATE escaneos
+        SET pendienteSubida = 0,
+            sincronizadoConBackend = 0,
+            syncError = :error
+        WHERE participanteId = :participanteId AND beneficioId = :beneficioId
+    """)
+    suspend fun marcarEscaneoConError(
+        participanteId: String,
+        beneficioId: String,
+        error: String
+    )
+
+    @Query("""
+        DELETE FROM escaneos
+        WHERE participanteId = :participanteId
+          AND beneficioId = :beneficioId
+          AND pendienteSubida = 0
+          AND sincronizadoConBackend = 1
+    """)
+    suspend fun borrarEscaneoConfirmado(participanteId: String, beneficioId: String)
+
+    @Query("""
+        DELETE FROM participantes
+        WHERE eventoId != :eventoIdActual
+          AND idParticipante NOT IN (
+              SELECT DISTINCT participanteId FROM escaneos WHERE pendienteSubida = 1
+          )
+    """)
+    suspend fun limpiarParticipantesSincronizadosDeOtrosEventos(eventoIdActual: String)
+
+    @Query("DELETE FROM escaneos WHERE eventoId != :eventoIdActual AND pendienteSubida = 0")
+    suspend fun limpiarEscaneosSincronizadosDeOtrosEventos(eventoIdActual: String)
+
+    @Query("DELETE FROM beneficios WHERE eventoId IS NOT NULL AND eventoId != :eventoIdActual")
+    suspend fun limpiarBeneficiosDeOtrosEventos(eventoIdActual: String)
+
+    @Query("SELECT * FROM beneficios ORDER BY orden ASC")
+    suspend fun obtenerBeneficios(): List<BeneficioEntity>
+
+    @Query("SELECT * FROM beneficios WHERE id = :id LIMIT 1")
+    suspend fun obtenerBeneficioPorId(id: String): BeneficioEntity?
+
+    @Query("SELECT * FROM beneficios WHERE estado = 1 ORDER BY orden ASC")
+    suspend fun obtenerBeneficiosActivos(): List<BeneficioEntity>
+
+    @Query("SELECT * FROM beneficios WHERE estado = 1 ORDER BY orden ASC")
+    fun observarBeneficiosActivos(): Flow<List<BeneficioEntity>>
+
+    @Query("""
+        DELETE FROM participantes
+        WHERE idParticipante IN (:ids)
+          AND idParticipante NOT IN (
+              SELECT DISTINCT participanteId FROM escaneos WHERE pendienteSubida = 1
+          )
+    """)
+    suspend fun eliminarParticipantesSinPendientes(ids: List<String>)
+
+    @Transaction
+    suspend fun aplicarPaginaDescarga(
+        beneficios: List<BeneficioEntity>,
+        participantesActivos: List<ParticipanteEntity>,
+        idsEliminados: List<String>,
+        escaneosUpsert: List<EscaneoEntity>,
+        escaneosBorrar: List<Pair<String, String>>
+    ) {
+        if (beneficios.isNotEmpty()) {
+            insertarBeneficios(beneficios)
+        }
+        if (participantesActivos.isNotEmpty()) {
+            insertarParticipantes(participantesActivos)
+        }
+        if (idsEliminados.isNotEmpty()) {
+            idsEliminados.chunked(500).forEach { eliminarParticipantesSinPendientes(it) }
+        }
+        if (escaneosUpsert.isNotEmpty()) {
+            upsertEscaneos(escaneosUpsert)
+        }
+        escaneosBorrar.forEach { (participanteId, beneficioId) ->
+            borrarEscaneoConfirmado(participanteId, beneficioId)
+        }
+    }
+
+    @Query("SELECT valor FROM sync_meta WHERE clave = :clave LIMIT 1")
+    suspend fun obtenerMeta(clave: String): String?
 }
