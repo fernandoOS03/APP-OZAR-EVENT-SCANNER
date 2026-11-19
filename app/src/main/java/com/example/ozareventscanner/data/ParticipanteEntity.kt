@@ -94,3 +94,4 @@ data class BeneficioConteo(
     val beneficioId: String,
     val total: Int
 )
+

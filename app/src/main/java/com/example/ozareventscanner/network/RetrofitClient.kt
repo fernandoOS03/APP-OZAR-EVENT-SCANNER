@@ -1,5 +1,6 @@
 package com.example.ozareventscanner.network
 
+import com.example.ozareventscanner.BuildConfig
 import com.example.ozareventscanner.data.SessionManager
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
@@ -12,10 +13,11 @@ import java.util.concurrent.TimeUnit
  * Incluye:
  *  - [AuthInterceptor] para adjuntar el JWT token automáticamente.
  *  - Timeouts explícitos para evitar bloqueos en redes inestables de eventos.
+ *  - URL base configurada dinámicamente según el entorno (Debug/Staging vs Release/Producción).
  */
 object RetrofitClient {
 
-    private const val URL_BASE = "https://api-eventos.zendov.com/"
+    private val URL_BASE: String = BuildConfig.BASE_URL
 
     var sessionManager: SessionManager? = null
 

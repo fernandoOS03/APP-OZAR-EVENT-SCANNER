@@ -36,6 +36,7 @@ data class SyncUploadRequest(
     val deviceId: String? = null
 )
 
+
 /**
  * Resultado por escaneo tras el procesamiento del backend.
  * [estado] = "CONFIRMADO" | "YA_ENTREGADO" | "RECHAZADO".
